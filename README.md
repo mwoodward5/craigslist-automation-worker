@@ -11,6 +11,8 @@ A Flask-based web service for automating Craigslist posting operations using Sel
 - Screenshot capture at each step
 - JSON API responses
 
+> **Note**: The posting functionality provides a foundation for Craigslist automation. The login and posting page navigation are fully implemented, while the complete multi-step posting form submission would need to be customized based on specific posting requirements.
+
 ## Installation
 
 ### Local Development
