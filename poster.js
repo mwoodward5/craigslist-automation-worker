@@ -75,6 +75,23 @@ async function safeWaitForNav(page, timeout = 15000) {
   }
 }
 
+// Ensure page context is still valid after navigation (prevents stale handle errors)
+async function ensurePageContext(page) {
+  try {
+    await page.mainFrame().executionContext();
+    return true;
+  } catch (e) {
+    console.log('Page context lost, waiting for new context...');
+    await delay(1000);
+    try {
+      await page.mainFrame().executionContext();
+      return true;
+    } catch (e2) {
+      throw new Error('Page context is not accessible: ' + e2.message);
+    }
+  }
+}
+
 // Select a radio button by matching label text (case-insensitive, trimmed)
 async function selectRadioByLabelText(page, targetText, description) {
   // CL structure: <label><input type="radio" ...> label text</label>
@@ -170,7 +187,7 @@ async function detectStage(page) {
   });
 }
 
-async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, updateJobStatus }) {
+async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, credentials, updateJobStatus }) {
   const { title, price, description, category, condition, make, model, imageUrls, phoneNumber, email, sourceUrl } = adData;
   const cityKey = targetCity || 'orangecounty';
   const cityInfo = CITY_MAP[cityKey] || CITY_MAP['orangecounty'];
@@ -216,11 +233,11 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       console.log('Login required — attempting to log in');
       await updateJobStatus(jobId, 'processing', 'logging_in');
 
-      const loginEmail = email || adData.clEmail || process.env.CL_EMAIL;
-      const loginPassword = adData.clPassword || process.env.CL_PASSWORD;
+      const loginEmail = (credentials && credentials.email) || process.env.CL_EMAIL;
+      const loginPassword = (credentials && credentials.password) || process.env.CL_PASSWORD;
 
       if (!loginEmail || !loginPassword) {
-        throw new Error('Login required but no credentials provided (set CL_EMAIL/CL_PASSWORD env vars or pass in adData)');
+        throw new Error('Login required but no credentials provided (pass credentials object or set CL_EMAIL/CL_PASSWORD env vars)');
       }
 
       const emailInput = await page.$('input[name="inputEmailHandle"]');
@@ -233,6 +250,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
           if (loginBtn) {
             await loginBtn.click();
             await safeWaitForNav(page);
+            await ensurePageContext(page);
             await delay(3000);
           }
         }
@@ -252,11 +270,13 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       if (newPostLink) {
         await newPostLink.click();
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       } else {
         // Just click continue to skip past it
         await clickContinueButton(page, 'skip copy-from-another');
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -277,6 +297,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       }
       if (await clickContinueButton(page, 'subarea continue')) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -294,6 +315,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       }
       if (await clickContinueButton(page, 'hood continue')) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -310,6 +332,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       await selectRadioByLabelText(page, postingType, 'posting type');
       if (await clickContinueButton(page, 'type continue')) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -371,6 +394,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
 
       if (await clickContinueButton(page, 'category continue')) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -422,6 +446,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       // Submit the form — CL uses button.pickbutton on form pages too
       if (await clickContinueButton(page, 'form submit')) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -436,6 +461,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       await updateJobStatus(jobId, 'processing', 'verifying_location');
       if (await clickContinueButton(page, 'geoverify continue')) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -511,6 +537,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
       }
       if (doneClicked) {
         await safeWaitForNav(page);
+        await ensurePageContext(page);
         await delay(2000);
       }
       stage = await detectStage(page);
@@ -537,6 +564,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, update
           console.log(`Clicking publish via ${sel} (text: "${text}")`);
           await btn.click();
           await safeWaitForNav(page);
+          await ensurePageContext(page);
           break;
         }
       }
