@@ -26,7 +26,7 @@ async function updateJobStatus(jobId, status, step, extra = {}) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'online', service: 'CL Puppeteer Poster', version: '2.0.0' });
+  res.json({ status: 'online', service: 'CL Puppeteer Poster', version: '2.1.0' });
 });
 
 app.get('/health', (req, res) => {
