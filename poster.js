@@ -50,6 +50,21 @@ const TYPE_MAP = {
   'com': 'community',              // community
   'eve': 'event / class',          // events
   'rid': 'community',              // rideshare
+  // Frontend QuickPostModal dropdown values (exact match)
+  'for-sale-general': 'for sale by owner',
+  'sporting-goods': 'for sale by owner',
+  'apts-housing': 'housing offered',
+  'rooms-shares': 'housing offered',
+  'vacation-rentals': 'housing offered',
+  'office-commercial': 'housing offered',
+  'services-household': 'service offered',
+  'services-labor': 'service offered',
+  'services-automotive': 'service offered',
+  'jobs-general': 'job offered',
+  'community-general': 'community',
+  'cars-trucks': 'for sale by owner',
+  'motorcycles': 'for sale by owner',
+  'gigs': 'gig offered',
 };
 
 // Default logger (overridden when called from server.js)
@@ -479,6 +494,21 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           'mco': 'motorcycles/scooters',
           'mcd': 'motorcycles/scooters',
           'apa': 'apts / housing',
+          // Frontend QuickPostModal dropdown values
+          'for-sale-general': 'general for sale',
+          'sporting-goods': 'sporting goods',
+          'apts-housing': 'apts / housing',
+          'rooms-shares': 'rooms / shared',
+          'vacation-rentals': 'vacation rentals',
+          'office-commercial': 'office / commercial',
+          'services-household': 'household services',
+          'services-labor': 'labor / hauling / moving',
+          'services-automotive': 'automotive services',
+          'jobs-general': 'general labor',
+          'community-general': 'general community',
+          'cars-trucks': 'cars & trucks',
+          'motorcycles': 'motorcycles/scooters',
+          'gigs': 'gigs',
         };
         const alias = catAliases[catKeyword] || catKeyword;
         if (alias !== catKeyword) {
