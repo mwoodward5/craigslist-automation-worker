@@ -48,15 +48,9 @@ async function waitAndGet(page, selector, description, timeout = 15000) {
   }
 }
 
-// Click the main "continue" / "pickbutton" button on wizard pages
-async function clickContinueButton(page, description = 'continue button', log = defaultLogger) {
-  const selectors = [
-    'button.pickbutton',
-    'button[name="go"]',
-    'button[type="submit"]',
-    'input[type="submit"]',
-  ];
-
+// Find the main "continue" / "pickbutton" button on wizard pages
+async function findContinueButton(page) {
+  const selectors = ['button.pickbutton', 'button[name="go"]', 'button[type="submit"]', 'input[type="submit"]'];
   for (const sel of selectors) {
     const btn = await page.$(sel);
     if (btn) {
@@ -64,24 +58,41 @@ async function clickContinueButton(page, description = 'continue button', log = 
         const style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
       });
-      if (isVisible) {
-        log.log(`Clicking ${description} via: ${sel}`);
-        await btn.click();
-        return true;
-      }
+      if (isVisible) return btn;
     }
   }
-  log.log(`No ${description} found, skipping`);
-  return false;
+  return null;
 }
 
-// Wait for navigation after a click, with fallback
-async function safeWaitForNav(page, timeout = 15000, log = defaultLogger) {
+// Click and wait for navigation using Promise.all to catch the nav event
+async function clickAndNavigate(page, clickFn, description = 'navigation', timeout = 20000, log = defaultLogger) {
+  log.log(`Clicking for ${description}...`);
   try {
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout });
+    // Start navigation wait BEFORE clicking, so we catch the navigation
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout }),
+      clickFn()
+    ]);
   } catch (e) {
-    log.log('Navigation wait timed out (may already be done)');
+    // Navigation might have already completed or not triggered
+    log.log(`Navigation for ${description}: ${e.message}`);
   }
+  // Wait for network to settle
+  try {
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 });
+  } catch (e) {
+    // Already idle
+  }
+  // Ensure the new page's DOM is ready
+  try {
+    await page.waitForSelector('body', { timeout: 10000 });
+  } catch (e) {
+    log.log(`Body selector wait failed: ${e.message}`);
+  }
+  // Extra delay for CL's JS to initialize
+  await delay(1500);
+  // Verify we have a valid context
+  await ensurePageContext(page, log);
 }
 
 // Ensure page context is still valid after navigation (prevents stale handle errors)
@@ -278,10 +289,8 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           await pwInput.type(loginPassword);
           const loginBtn = await page.$('button[type="submit"]');
           if (loginBtn) {
-            await loginBtn.click();
-            await safeWaitForNav(page, 15000, log);
-            await ensurePageContext(page, log);
-            await delay(3000);
+            await clickAndNavigate(page, () => loginBtn.click(), 'login submit', 15000, log);
+            await delay(1500);
           }
         }
       }
@@ -297,15 +306,12 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       log.log('On copy-from-another page, looking for skip/new option');
       const newPostLink = await page.$('a[href*="new"], button[name="skip"]');
       if (newPostLink) {
-        await newPostLink.click();
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+        await clickAndNavigate(page, () => newPostLink.click(), 'skip copy-from-another', 15000, log);
       } else {
-        await clickContinueButton(page, 'skip copy-from-another', log);
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+        const btn = await findContinueButton(page);
+        if (btn) {
+          await clickAndNavigate(page, () => btn.click(), 'skip copy-from-another', 15000, log);
+        }
       }
       stage = await detectStage(page);
       log.log('Stage after skip:', stage);
@@ -322,10 +328,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         await firstRadio.click();
         log.log('Selected first subarea');
       }
-      if (await clickContinueButton(page, 'subarea continue', log)) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      const btn = await findContinueButton(page);
+      if (btn) {
+        await clickAndNavigate(page, () => btn.click(), 'subarea continue', 15000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after subarea:', stage);
@@ -340,10 +345,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       if (firstRadio) {
         await firstRadio.click();
       }
-      if (await clickContinueButton(page, 'hood continue', log)) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      const btn = await findContinueButton(page);
+      if (btn) {
+        await clickAndNavigate(page, () => btn.click(), 'hood continue', 15000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after hood:', stage);
@@ -356,10 +360,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await updateJobStatus(jobId, 'processing', 'selecting_type');
       log.log(`Selecting posting type: "${postingType}"`);
       await selectRadioByLabelText(page, postingType, 'posting type', log);
-      if (await clickContinueButton(page, 'type continue', log)) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      const btn = await findContinueButton(page);
+      if (btn) {
+        await clickAndNavigate(page, () => btn.click(), 'type continue', 20000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after type:', stage);
@@ -414,10 +417,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         }
       }
 
-      if (await clickContinueButton(page, 'category continue', log)) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      const catBtn = await findContinueButton(page);
+      if (catBtn) {
+        await clickAndNavigate(page, () => catBtn.click(), 'category continue', 20000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after category:', stage);
@@ -455,10 +457,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
       log.log('Form filled, submitting...');
 
-      if (await clickContinueButton(page, 'form submit', log)) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      const submitBtn = await findContinueButton(page);
+      if (submitBtn) {
+        await clickAndNavigate(page, () => submitBtn.click(), 'form submit', 20000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after form submit:', stage);
@@ -470,10 +471,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     if (stage === 'geoverify') {
       log.log('On geo-verify / map page');
       await updateJobStatus(jobId, 'processing', 'verifying_location');
-      if (await clickContinueButton(page, 'geoverify continue', log)) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      const geoBtn = await findContinueButton(page);
+      if (geoBtn) {
+        await clickAndNavigate(page, () => geoBtn.click(), 'geoverify continue', 20000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after geoverify:', stage);
@@ -531,21 +531,18 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         'button.pickbutton',
         'button[type="submit"]',
       ];
-      let doneClicked = false;
+      let doneBtn = null;
       for (const sel of doneSelectors) {
         const btn = await page.$(sel);
         if (btn) {
           const text = await btn.evaluate(el => el.textContent?.trim().toLowerCase() || el.value?.toLowerCase() || '');
           log.log(`Found done button: ${sel} (text: "${text}")`);
-          await btn.click();
-          doneClicked = true;
+          doneBtn = btn;
           break;
         }
       }
-      if (doneClicked) {
-        await safeWaitForNav(page, 15000, log);
-        await ensurePageContext(page, log);
-        await delay(2000);
+      if (doneBtn) {
+        await clickAndNavigate(page, () => doneBtn.click(), 'done with images', 15000, log);
       }
       stage = await detectStage(page);
       log.log('Stage after images:', stage);
@@ -568,13 +565,11 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         if (btn) {
           const text = await btn.evaluate(el => el.textContent?.trim() || el.value || '');
           log.log(`Clicking publish via ${sel} (text: "${text}")`);
-          await btn.click();
-          await safeWaitForNav(page, 15000, log);
-          await ensurePageContext(page, log);
+          await clickAndNavigate(page, () => btn.click(), 'publish', 20000, log);
           break;
         }
       }
-      await delay(3000);
+      await delay(1500);
       stage = await detectStage(page);
       log.log('Stage after publish:', stage);
     }
