@@ -167,7 +167,10 @@ async function clickAndNavigate(page, clickFn, description = 'navigation', timeo
 // form submission/navigation. So we ONLY check the radio — we do NOT click the label.
 // The actual form submission is handled separately by findContinueButton + clickAndNavigate.
 async function selectRadioByLabelText(page, targetText, description, log = defaultLogger) {
-  // Step 1: Just CHECK the radio button — don't click the label (which auto-submits)
+  // Step 1: Just CHECK the radio button — NO click, NO change event dispatch.
+  // CL's JS listens for both click and change events and auto-submits the form,
+  // which navigates the page and destroys the execution context.
+  // We only set .checked = true, then the continue button handles submission.
   const selected = await safeEvaluate(page, (target) => {
     const labels = document.querySelectorAll('form.picker label, .selection-list label');
     for (const label of labels) {
@@ -176,8 +179,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
         const radio = label.querySelector('input[type="radio"]');
         if (radio) {
           radio.checked = true;
-          radio.dispatchEvent(new Event('change', { bubbles: true }));
-          // DO NOT call label.click() — it triggers navigation and destroys context
+          // DO NOT dispatch events or click — CL auto-submits on these
           return text;
         }
       }
@@ -199,8 +201,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
         const radio = label.querySelector('input[type="radio"]');
         if (radio) {
           radio.checked = true;
-          radio.dispatchEvent(new Event('change', { bubbles: true }));
-          // DO NOT call label.click()
+          // DO NOT dispatch events or click
           return text;
         }
       }
@@ -455,13 +456,12 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       }
       if (!found) {
         // Last resort: select first available radio
+        // Only set .checked — DO NOT dispatch events or click labels.
+        // CL's JS auto-submits on change/click, destroying the execution context.
         await safeEvaluate(page, () => {
           const radio = document.querySelector('form.picker input[type="radio"]');
           if (radio) {
             radio.checked = true;
-            radio.dispatchEvent(new Event('change', { bubbles: true }));
-            const label = radio.closest('label');
-            if (label) label.click();
           }
         }, undefined, log);
         log.log('Selected first available category as fallback');
