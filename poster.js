@@ -522,19 +522,27 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await fillField(page, 'textarea[name="PostingBody"]', description || '', 'description', log);
       await fillField(page, 'input[name="postal"]', adData.zip || adData.zipCode || '92694', 'zip', log);
 
-      if (condition) {
-        const condSelect = await page.$('select[name="condition"]');
-        if (condSelect) {
-          const condMap = { 'new': '10', 'like new': '20', 'excellent': '30', 'good': '40', 'fair': '50', 'salvage': '60' };
-          const condValue = condMap[condition.toLowerCase()] || '20';
-          await page.select('select[name="condition"]', condValue);
-          log.log('Set condition:', condition, '→', condValue);
-        }
-      }
+      // Brief pause after zip — CL sometimes does AJAX validation that modifies the DOM
+      await delay(1000);
 
-      if (make) await fillField(page, 'input[name="make_manufacturer"]', make, 'make', log);
-      if (model) await fillField(page, 'input[name="model_name_number"]', model, 'model', log);
-      if (phoneNumber) await fillField(page, 'input[name="contact_phone"]', phoneNumber, 'phone', log);
+      // Optional fields — all wrapped in try/catch so failures don't kill the posting
+      try {
+        if (condition) {
+          const condSelect = await page.$('select[name="condition"]');
+          if (condSelect) {
+            const condMap = { 'new': '10', 'like new': '20', 'excellent': '30', 'good': '40', 'fair': '50', 'salvage': '60' };
+            const condValue = condMap[condition.toLowerCase()] || '20';
+            await page.select('select[name="condition"]', condValue);
+            log.log('Set condition:', condition, '→', condValue);
+          }
+        }
+
+        if (make) await fillField(page, 'input[name="make_manufacturer"]', make, 'make', log);
+        if (model) await fillField(page, 'input[name="model_name_number"]', model, 'model', log);
+        if (phoneNumber) await fillField(page, 'input[name="contact_phone"]', phoneNumber, 'phone', log);
+      } catch (optionalErr) {
+        log.log(`Warning: Optional field error (non-fatal): ${optionalErr.message.substring(0, 80)}`);
+      }
 
       log.log('Form filled, submitting...');
 
@@ -695,15 +703,22 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 }
 
 // Helper to safely fill a form field (clear + type)
+// Uses evaluate to clear the field instead of .click() which can throw
+// "Node is either not clickable or not an Element" on CL's dynamic forms.
 async function fillField(page, selector, value, fieldName, log = defaultLogger) {
   if (!value) return;
-  const el = await page.$(selector);
-  if (el) {
-    await el.click({ clickCount: 3 });
-    await el.type(value);
-    log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
-  } else {
-    log.log(`Field not found: ${fieldName} (${selector})`);
+  try {
+    const el = await page.$(selector);
+    if (el) {
+      // Clear field safely via JS (no Puppeteer .click() which can fail on detached/obscured nodes)
+      await el.evaluate(e => { e.focus(); e.value = ''; });
+      await el.type(value);
+      log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
+    } else {
+      log.log(`Field not found: ${fieldName} (${selector})`);
+    }
+  } catch (err) {
+    log.log(`Warning: Could not fill ${fieldName}: ${err.message.substring(0, 80)}`);
   }
 }
 
