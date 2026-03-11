@@ -96,45 +96,70 @@ async function safeEvaluate(page, fn, args, log = defaultLogger, retries = 5) {
 }
 
 // Navigate to a new page by clicking, then wait for it to fully stabilize.
-// Instead of Promise.all (which can still race), we use a simpler approach:
-// click, then poll until the URL changes and page.evaluate works.
+// CL's wizard does full-page navigations that destroy the execution context.
+// We must wait until the NEW page's context is fully ready before returning.
 async function clickAndNavigate(page, clickFn, description = 'navigation', timeout = 25000, log = defaultLogger) {
   const urlBefore = page.url();
   log.log(`Clicking for ${description} (current URL: ${urlBefore})...`);
   
-  // Click the button
-  await clickFn();
-  
-  // Wait for URL to change (CL wizard always changes the ?s= param)
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    await delay(500);
-    const currentUrl = page.url();
-    if (currentUrl !== urlBefore) {
-      log.log(`URL changed to: ${currentUrl}`);
-      break;
-    }
+  // Click the button — don't await navigation events, they race with context destruction
+  try {
+    await clickFn();
+  } catch (e) {
+    // Click itself can throw if the page navigates during the click — that's OK
+    log.log(`Click threw (expected during navigation): ${e.message.substring(0, 80)}`);
   }
   
-  // Now wait for the new page's DOM to be ready
-  // Use a polling approach instead of waitForNavigation which can race
-  for (let i = 0; i < 10; i++) {
+  // Give the browser time to start the navigation
+  await delay(1000);
+  
+  // Poll until URL changes (CL wizard always changes the ?s= param)
+  const start = Date.now();
+  let urlChanged = false;
+  while (Date.now() - start < timeout) {
     try {
-      await page.waitForSelector('body', { timeout: 3000 });
-      // Verify we can actually run JS in the page context
-      const title = await page.title();
-      if (title) {
-        log.log(`Page ready: "${title}"`);
+      const currentUrl = page.url();
+      if (currentUrl !== urlBefore) {
+        log.log(`URL changed to: ${currentUrl}`);
+        urlChanged = true;
         break;
       }
     } catch (e) {
-      log.log(`Waiting for page to stabilize (${i + 1}/10)...`);
-      await delay(1000);
+      // page.url() can throw during navigation — just wait
+    }
+    await delay(500);
+  }
+  
+  if (!urlChanged) {
+    log.log(`WARNING: URL did not change after ${timeout}ms`);
+  }
+  
+  // Critical: wait for the NEW page's execution context to be ready.
+  // After CL navigation, the old context is destroyed and a new one is created.
+  // We must wait until page.evaluate() actually works.
+  log.log('Waiting for new page context to stabilize...');
+  await delay(2000); // Give CL's JS time to initialize
+  
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    try {
+      // This is the real test — can we run JS in the page?
+      const title = await page.evaluate(() => document.title);
+      log.log(`Page context ready (attempt ${attempt}): "${title}"`);
+      return; // Success — context is usable
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('context') || msg.includes('destroyed') || msg.includes('Protocol error') || msg.includes('Cannot find')) {
+        log.log(`Context not ready yet (attempt ${attempt}/8): ${msg.substring(0, 60)}`);
+        await delay(1000 + attempt * 500); // 1.5s, 2s, 2.5s, 3s, 3.5s, 4s, 4.5s, 5s
+      } else {
+        throw e; // Unexpected error
+      }
     }
   }
   
-  // Final settle delay for CL's JS
-  await delay(2000);
+  // If we get here, context never stabilized — log but don't throw,
+  // let the caller's safeEvaluate handle the retry
+  log.log('WARNING: Page context did not stabilize after 8 attempts, proceeding anyway');
 }
 
 // Select a radio button by matching label text (case-insensitive, trimmed)
