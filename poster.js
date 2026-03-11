@@ -21,9 +21,20 @@ const TYPE_MAP = {
   'furniture': 'for sale by owner',
   'auto-parts': 'for sale by owner',
   'cell-phones': 'for sale by owner',
+  'bicycles': 'for sale by owner',
+  'bikes': 'for sale by owner',
+  'bicycle': 'for sale by owner',
+  'sporting': 'for sale by owner',
+  'tools': 'for sale by owner',
+  'appliances': 'for sale by owner',
+  'clothing': 'for sale by owner',
+  'collectibles': 'for sale by owner',
   'housing': 'housing offered',
   'real-estate': 'for sale by owner',
 };
+
+// Default logger (overridden when called from server.js)
+const defaultLogger = { log: console.log, error: console.error };
 
 // Robust helper: wait for selector then return element, throws with context on failure
 async function waitAndGet(page, selector, description, timeout = 15000) {
@@ -38,8 +49,7 @@ async function waitAndGet(page, selector, description, timeout = 15000) {
 }
 
 // Click the main "continue" / "pickbutton" button on wizard pages
-// CL uses: <button class="pickbutton" type="submit" name="go" value="Continue">continue</button>
-async function clickContinueButton(page, description = 'continue button') {
+async function clickContinueButton(page, description = 'continue button', log = defaultLogger) {
   const selectors = [
     'button.pickbutton',
     'button[name="go"]',
@@ -55,46 +65,42 @@ async function clickContinueButton(page, description = 'continue button') {
         return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
       });
       if (isVisible) {
-        console.log(`Clicking ${description} via: ${sel}`);
+        log.log(`Clicking ${description} via: ${sel}`);
         await btn.click();
         return true;
       }
     }
   }
-  console.log(`No ${description} found, skipping`);
+  log.log(`No ${description} found, skipping`);
   return false;
 }
 
 // Wait for navigation after a click, with fallback
-async function safeWaitForNav(page, timeout = 15000) {
+async function safeWaitForNav(page, timeout = 15000, log = defaultLogger) {
   try {
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout });
   } catch (e) {
-    // Navigation may have already completed or page didn't navigate
-    console.log('Navigation wait timed out (may already be done)');
+    log.log('Navigation wait timed out (may already be done)');
   }
 }
 
 // Ensure page context is still valid after navigation (prevents stale handle errors)
-async function ensurePageContext(page) {
-  try {
-    await page.mainFrame().executionContext();
-    return true;
-  } catch (e) {
-    console.log('Page context lost, waiting for new context...');
-    await delay(1000);
+// Now retries 3 times with increasing delay
+async function ensurePageContext(page, log = defaultLogger) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await page.mainFrame().executionContext();
       return true;
-    } catch (e2) {
-      throw new Error('Page context is not accessible: ' + e2.message);
+    } catch (e) {
+      log.log(`Page context lost (attempt ${attempt}/3), waiting...`);
+      await delay(attempt * 1000);
     }
   }
+  throw new Error('Page context is not accessible after 3 retries');
 }
 
 // Select a radio button by matching label text (case-insensitive, trimmed)
-async function selectRadioByLabelText(page, targetText, description) {
-  // CL structure: <label><input type="radio" ...> label text</label>
+async function selectRadioByLabelText(page, targetText, description, log = defaultLogger) {
   const selected = await page.evaluate((target) => {
     const labels = document.querySelectorAll('form.picker label, .selection-list label');
     for (const label of labels) {
@@ -113,7 +119,7 @@ async function selectRadioByLabelText(page, targetText, description) {
   }, targetText);
 
   if (selected) {
-    console.log(`Selected ${description}: "${selected}"`);
+    log.log(`Selected ${description}: "${selected}"`);
     return true;
   }
 
@@ -136,15 +142,15 @@ async function selectRadioByLabelText(page, targetText, description) {
   }, targetText);
 
   if (partial) {
-    console.log(`Selected ${description} (partial match): "${partial}"`);
+    log.log(`Selected ${description} (partial match): "${partial}"`);
     return true;
   }
 
-  console.log(`Could not find ${description} matching "${targetText}"`);
+  log.log(`Could not find ${description} matching "${targetText}"`);
   return false;
 }
 
-// Delay helper (replaces deprecated waitForTimeout)
+// Delay helper
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -166,13 +172,10 @@ async function detectStage(page) {
   return await page.evaluate(() => {
     const body = document.body;
     const classes = body.className || '';
-    // CL sets body classes like: "cl-posting-process post type"
-    // Stages: copyfromanother, subarea, hood, type, cat, edit, geoverify, editimage, preview, finalize
     const stages = ['copyfromanother', 'subarea', 'hood', 'type', 'cat', 'edit', 'geoverify', 'editimage', 'preview', 'finalize'];
     for (const s of stages) {
       if (classes.includes(s)) return s;
     }
-    // Fallback: check the page title
     const title = document.title.toLowerCase();
     if (title.includes('choose type')) return 'type';
     if (title.includes('choose category')) return 'cat';
@@ -187,7 +190,26 @@ async function detectStage(page) {
   });
 }
 
-async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, credentials, updateJobStatus }) {
+// Capture debug info from current page for error context
+async function capturePageDebug(page, log) {
+  try {
+    const url = page.url();
+    const title = await page.title().catch(() => '(unknown)');
+    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => '(unavailable)');
+    log.error(`[DEBUG] URL: ${url}`);
+    log.error(`[DEBUG] Title: ${title}`);
+    log.error(`[DEBUG] Body: ${bodyText}`);
+    // Save screenshot to tmp for debugging
+    const screenshotPath = path.join(os.tmpdir(), `cl-error-${Date.now()}.png`);
+    await page.screenshot({ path: screenshotPath, fullPage: false }).catch(() => {});
+    log.error(`[DEBUG] Screenshot saved: ${screenshotPath}`);
+  } catch (e) {
+    log.error('[DEBUG] Failed to capture page debug:', e.message);
+  }
+}
+
+async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, credentials, updateJobStatus, logger }) {
+  const log = logger || defaultLogger;
   const { title, price, description, category, condition, make, model, imageUrls, phoneNumber, email, sourceUrl } = adData;
   const cityKey = targetCity || 'orangecounty';
   const cityInfo = CITY_MAP[cityKey] || CITY_MAP['orangecounty'];
@@ -195,7 +217,10 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[category] || TYPE_MAP[category?.toLowerCase()] || 'for sale by owner';
 
-  const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--window-size=1280,900'];
+  const launchArgs = [
+    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+    '--window-size=1280,900', '--disable-blink-features=AutomationControlled',
+  ];
   if (proxyConfig && proxyConfig.host) {
     launchArgs.push(`--proxy-server=${proxyConfig.host}:${proxyConfig.port}`);
   }
@@ -204,6 +229,12 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
   try {
     const page = await browser.newPage();
+
+    // Evade bot detection
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
+
     if (proxyConfig && proxyConfig.username) {
       await page.authenticate({ username: proxyConfig.username, password: proxyConfig.password });
     }
@@ -212,31 +243,30 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
     // =========================================================
     // Step 1: Navigate directly to the CL posting wizard for the target area
-    // The current CL flow: https://post.craigslist.org/c/{areaCode} → wizard
     // =========================================================
     await updateJobStatus(jobId, 'processing', 'navigating');
     const postUrl = `https://post.craigslist.org/c/${areaCode}`;
-    console.log('Navigating directly to posting wizard:', postUrl);
+    log.log('Navigating directly to posting wizard:', postUrl);
     await page.goto(postUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await delay(2000);
-    console.log('Wizard URL:', page.url());
+    log.log('Wizard URL:', page.url());
 
-    // Detect which stage we landed on and navigate accordingly
     let stage = await detectStage(page);
-    console.log('Detected initial stage:', stage);
+    log.log('Detected initial stage:', stage);
 
     // =========================================================
     // Handle login redirect if needed
     // =========================================================
     const currentUrl = page.url();
     if (currentUrl.includes('accounts.craigslist.org/login')) {
-      console.log('Login required — attempting to log in');
+      log.log('Login required — attempting to log in');
       await updateJobStatus(jobId, 'processing', 'logging_in');
 
       const loginEmail = (credentials && credentials.email) || process.env.CL_EMAIL;
       const loginPassword = (credentials && credentials.password) || process.env.CL_PASSWORD;
 
       if (!loginEmail || !loginPassword) {
+        await capturePageDebug(page, log);
         throw new Error('Login required but no credentials provided (pass credentials object or set CL_EMAIL/CL_PASSWORD env vars)');
       }
 
@@ -249,109 +279,102 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           const loginBtn = await page.$('button[type="submit"]');
           if (loginBtn) {
             await loginBtn.click();
-            await safeWaitForNav(page);
-            await ensurePageContext(page);
+            await safeWaitForNav(page, 15000, log);
+            await ensurePageContext(page, log);
             await delay(3000);
           }
         }
       }
-      console.log('After login URL:', page.url());
+      log.log('After login URL:', page.url());
       stage = await detectStage(page);
-      console.log('Stage after login:', stage);
+      log.log('Stage after login:', stage);
     }
 
     // =========================================================
     // Step 2: Handle "copy from previous" page if it appears
     // =========================================================
     if (stage === 'copyfromanother') {
-      console.log('On copy-from-another page, looking for skip/new option');
-      // Try clicking "create a new posting" or skip
+      log.log('On copy-from-another page, looking for skip/new option');
       const newPostLink = await page.$('a[href*="new"], button[name="skip"]');
       if (newPostLink) {
         await newPostLink.click();
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       } else {
-        // Just click continue to skip past it
-        await clickContinueButton(page, 'skip copy-from-another');
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+        await clickContinueButton(page, 'skip copy-from-another', log);
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after skip:', stage);
+      log.log('Stage after skip:', stage);
     }
 
     // =========================================================
     // Step 3: Handle subarea selection if it appears
     // =========================================================
     if (stage === 'subarea') {
-      console.log('On subarea selection page');
+      log.log('On subarea selection page');
       await updateJobStatus(jobId, 'processing', 'selecting_area');
-      // Select first subarea by default (or try to match)
       const firstRadio = await page.$('form.picker input[type="radio"]');
       if (firstRadio) {
         await firstRadio.click();
-        console.log('Selected first subarea');
+        log.log('Selected first subarea');
       }
-      if (await clickContinueButton(page, 'subarea continue')) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+      if (await clickContinueButton(page, 'subarea continue', log)) {
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after subarea:', stage);
+      log.log('Stage after subarea:', stage);
     }
 
     // =========================================================
     // Step 3b: Handle neighborhood (hood) selection if it appears
     // =========================================================
     if (stage === 'hood') {
-      console.log('On neighborhood selection page');
+      log.log('On neighborhood selection page');
       const firstRadio = await page.$('form.picker input[type="radio"]');
       if (firstRadio) {
         await firstRadio.click();
       }
-      if (await clickContinueButton(page, 'hood continue')) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+      if (await clickContinueButton(page, 'hood continue', log)) {
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after hood:', stage);
+      log.log('Stage after hood:', stage);
     }
 
     // =========================================================
     // Step 4: Choose type (e.g. "for sale by owner")
-    // CL structure: form.picker > ul.selection-list > li > label > input[type="radio"][name="id"]
     // =========================================================
     if (stage === 'type') {
       await updateJobStatus(jobId, 'processing', 'selecting_type');
-      console.log(`Selecting posting type: "${postingType}"`);
-      await selectRadioByLabelText(page, postingType, 'posting type');
-      if (await clickContinueButton(page, 'type continue')) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+      log.log(`Selecting posting type: "${postingType}"`);
+      await selectRadioByLabelText(page, postingType, 'posting type', log);
+      if (await clickContinueButton(page, 'type continue', log)) {
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after type:', stage);
+      log.log('Stage after type:', stage);
     }
 
     // =========================================================
     // Step 5: Choose category
-    // Same form.picker structure with radio buttons
     // =========================================================
     if (stage === 'cat') {
       await updateJobStatus(jobId, 'processing', 'selecting_category');
       const catKeyword = (category || 'general').toLowerCase();
-      console.log(`Selecting category matching: "${catKeyword}"`);
+      log.log(`Selecting category matching: "${catKeyword}"`);
 
-      // Try exact match first, then partial, then keywords
-      let found = await selectRadioByLabelText(page, catKeyword, 'category');
+      let found = await selectRadioByLabelText(page, catKeyword, 'category', log);
       if (!found) {
-        // Try common category mappings
         const catAliases = {
           'electronics': 'electronics',
           'computer': 'computers',
@@ -372,11 +395,10 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         };
         const alias = catAliases[catKeyword] || catKeyword;
         if (alias !== catKeyword) {
-          found = await selectRadioByLabelText(page, alias, 'category (alias)');
+          found = await selectRadioByLabelText(page, alias, 'category (alias)', log);
         }
       }
       if (!found) {
-        // Select first available category as fallback
         const firstRadio = await page.$('form.picker input[type="radio"]');
         if (firstRadio) {
           await page.evaluate(() => {
@@ -388,84 +410,73 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
               if (label) label.click();
             }
           });
-          console.log('Selected first available category as fallback');
+          log.log('Selected first available category as fallback');
         }
       }
 
-      if (await clickContinueButton(page, 'category continue')) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+      if (await clickContinueButton(page, 'category continue', log)) {
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after category:', stage);
+      log.log('Stage after category:', stage);
     }
 
     // =========================================================
     // Step 6: Fill the posting form (stage: edit)
-    // CL form fields: PostingTitle, price, PostingBody, postal, condition, etc.
     // =========================================================
     if (stage === 'edit') {
       await updateJobStatus(jobId, 'processing', 'filling_form');
-      console.log('Filling posting form...');
+      log.log('Filling posting form...');
 
-      // Wait for the form to be fully loaded
       await page.waitForSelector('input[name="PostingTitle"], #PostingTitle', { timeout: 15000 }).catch(() => {
-        console.log('Warning: PostingTitle field not found within timeout');
+        log.log('Warning: PostingTitle field not found within timeout');
       });
 
-      // Title
-      await fillField(page, 'input[name="PostingTitle"]', title || 'Item for Sale', 'title');
-      // Price
-      await fillField(page, 'input[name="price"]', String(price || ''), 'price');
-      // Description
-      await fillField(page, 'textarea[name="PostingBody"]', description || '', 'description');
-      // Zip code
-      await fillField(page, 'input[name="postal"]', adData.zip || adData.zipCode || '92694', 'zip');
+      await fillField(page, 'input[name="PostingTitle"]', title || 'Item for Sale', 'title', log);
+      await fillField(page, 'input[name="price"]', String(price || ''), 'price', log);
+      await fillField(page, 'textarea[name="PostingBody"]', description || '', 'description', log);
+      await fillField(page, 'input[name="postal"]', adData.zip || adData.zipCode || '92694', 'zip', log);
 
-      // Condition dropdown
       if (condition) {
         const condSelect = await page.$('select[name="condition"]');
         if (condSelect) {
           const condMap = { 'new': '10', 'like new': '20', 'excellent': '30', 'good': '40', 'fair': '50', 'salvage': '60' };
           const condValue = condMap[condition.toLowerCase()] || '20';
           await page.select('select[name="condition"]', condValue);
-          console.log('Set condition:', condition, '→', condValue);
+          log.log('Set condition:', condition, '→', condValue);
         }
       }
 
-      // Make / Manufacturer
-      if (make) await fillField(page, 'input[name="make_manufacturer"]', make, 'make');
-      // Model
-      if (model) await fillField(page, 'input[name="model_name_number"]', model, 'model');
-      // Phone
-      if (phoneNumber) await fillField(page, 'input[name="contact_phone"]', phoneNumber, 'phone');
+      if (make) await fillField(page, 'input[name="make_manufacturer"]', make, 'make', log);
+      if (model) await fillField(page, 'input[name="model_name_number"]', model, 'model', log);
+      if (phoneNumber) await fillField(page, 'input[name="contact_phone"]', phoneNumber, 'phone', log);
 
-      console.log('Form filled, submitting...');
+      log.log('Form filled, submitting...');
 
-      // Submit the form — CL uses button.pickbutton on form pages too
-      if (await clickContinueButton(page, 'form submit')) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+      if (await clickContinueButton(page, 'form submit', log)) {
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after form submit:', stage);
+      log.log('Stage after form submit:', stage);
     }
 
     // =========================================================
     // Step 6b: Handle geoverify / map page if it appears
     // =========================================================
     if (stage === 'geoverify') {
-      console.log('On geo-verify / map page');
+      log.log('On geo-verify / map page');
       await updateJobStatus(jobId, 'processing', 'verifying_location');
-      if (await clickContinueButton(page, 'geoverify continue')) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+      if (await clickContinueButton(page, 'geoverify continue', log)) {
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after geoverify:', stage);
+      log.log('Stage after geoverify:', stage);
     }
 
     // =========================================================
@@ -473,49 +484,45 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     // =========================================================
     if (stage === 'editimage') {
       await updateJobStatus(jobId, 'processing', 'uploading_images');
-      console.log('On image upload page');
+      log.log('On image upload page');
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cl-images-'));
       let imagePaths = [];
 
       if (imageUrls && imageUrls.length > 0) {
-        console.log(`Downloading ${imageUrls.length} images`);
+        log.log(`Downloading ${imageUrls.length} images`);
         for (let i = 0; i < Math.min(imageUrls.length, 12); i++) {
           try {
             const ext = imageUrls[i].match(/\.(jpg|jpeg|png|gif|webp)/i)?.[1] || 'jpg';
             const imgPath = path.join(tmpDir, `image_${i}.${ext}`);
             await downloadImage(imageUrls[i], imgPath);
             imagePaths.push(imgPath);
-            console.log(`Downloaded image ${i + 1}/${imageUrls.length}`);
+            log.log(`Downloaded image ${i + 1}/${imageUrls.length}`);
           } catch (e) {
-            console.error(`Image ${i} download failed:`, e.message);
+            log.error(`Image ${i} download failed:`, e.message);
           }
         }
       }
-      console.log(`Total images to upload: ${imagePaths.length}`);
+      log.log(`Total images to upload: ${imagePaths.length}`);
 
-      // Upload images one at a time
       for (const imgPath of imagePaths) {
         try {
-          // CL image upload uses an <input type="file"> element
           const fileInput = await page.$('input[type="file"]');
           if (fileInput) {
             await fileInput.uploadFile(imgPath);
-            // Wait for upload to process
             await delay(3000);
-            console.log(`Uploaded: ${path.basename(imgPath)}`);
+            log.log(`Uploaded: ${path.basename(imgPath)}`);
           } else {
-            console.log('No file input found on image page');
+            log.log('No file input found on image page');
           }
           fs.unlinkSync(imgPath);
         } catch (e) {
-          console.error('Image upload failed:', e.message);
+          log.error('Image upload failed:', e.message);
           try { fs.unlinkSync(imgPath); } catch (_) {}
         }
       }
       try { fs.rmdirSync(tmpDir); } catch (_) {}
 
-      // Click "done with images" — CL uses various selectors for this
       const doneSelectors = [
         'button.done',
         'button[value="done with images"]',
@@ -529,19 +536,19 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         const btn = await page.$(sel);
         if (btn) {
           const text = await btn.evaluate(el => el.textContent?.trim().toLowerCase() || el.value?.toLowerCase() || '');
-          console.log(`Found done button: ${sel} (text: "${text}")`);
+          log.log(`Found done button: ${sel} (text: "${text}")`);
           await btn.click();
           doneClicked = true;
           break;
         }
       }
       if (doneClicked) {
-        await safeWaitForNav(page);
-        await ensurePageContext(page);
+        await safeWaitForNav(page, 15000, log);
+        await ensurePageContext(page, log);
         await delay(2000);
       }
       stage = await detectStage(page);
-      console.log('Stage after images:', stage);
+      log.log('Stage after images:', stage);
     }
 
     // =========================================================
@@ -549,9 +556,8 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     // =========================================================
     if (stage === 'preview') {
       await updateJobStatus(jobId, 'processing', 'publishing');
-      console.log('On preview page, clicking publish');
+      log.log('On preview page, clicking publish');
 
-      // CL preview page has a publish/submit button
       const publishSelectors = [
         'button.pickbutton',
         'button[type="submit"]',
@@ -561,16 +567,16 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         const btn = await page.$(sel);
         if (btn) {
           const text = await btn.evaluate(el => el.textContent?.trim() || el.value || '');
-          console.log(`Clicking publish via ${sel} (text: "${text}")`);
+          log.log(`Clicking publish via ${sel} (text: "${text}")`);
           await btn.click();
-          await safeWaitForNav(page);
-          await ensurePageContext(page);
+          await safeWaitForNav(page, 15000, log);
+          await ensurePageContext(page, log);
           break;
         }
       }
       await delay(3000);
       stage = await detectStage(page);
-      console.log('Stage after publish:', stage);
+      log.log('Stage after publish:', stage);
     }
 
     // =========================================================
@@ -579,32 +585,40 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     const finalUrl = page.url();
     let postUrl2 = finalUrl;
 
-    // Try to find a link to the actual posting
     const confirmLink = await page.$('a[href*="/d/"], a.manageable-ad-link, a[href*="craigslist.org"][href*="/"]');
     if (confirmLink) {
       postUrl2 = await confirmLink.evaluate(el => el.href) || finalUrl;
     }
 
-    console.log('Final URL:', finalUrl);
-    console.log('Post URL:', postUrl2);
-    console.log('Final stage:', stage);
+    log.log('Final URL:', finalUrl);
+    log.log('Post URL:', postUrl2);
+    log.log('Final stage:', stage);
 
     return { postUrl: postUrl2, success: true };
+  } catch (err) {
+    // Capture debug info on any failure before re-throwing
+    try {
+      const pages = await browser.pages();
+      if (pages.length > 0) {
+        await capturePageDebug(pages[pages.length - 1], logger || defaultLogger);
+      }
+    } catch (_) {}
+    throw err;
   } finally {
     await browser.close();
   }
 }
 
 // Helper to safely fill a form field (clear + type)
-async function fillField(page, selector, value, fieldName) {
+async function fillField(page, selector, value, fieldName, log = defaultLogger) {
   if (!value) return;
   const el = await page.$(selector);
   if (el) {
-    await el.click({ clickCount: 3 }); // Select all existing text
+    await el.click({ clickCount: 3 });
     await el.type(value);
-    console.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
+    log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
   } else {
-    console.log(`Field not found: ${fieldName} (${selector})`);
+    log.log(`Field not found: ${fieldName} (${selector})`);
   }
 }
 
