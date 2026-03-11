@@ -163,8 +163,11 @@ async function clickAndNavigate(page, clickFn, description = 'navigation', timeo
 }
 
 // Select a radio button by matching label text (case-insensitive, trimmed)
-// Uses safeEvaluate to handle stale contexts
+// IMPORTANT: On CL wizard pages, clicking a radio label can IMMEDIATELY trigger
+// form submission/navigation. So we ONLY check the radio — we do NOT click the label.
+// The actual form submission is handled separately by findContinueButton + clickAndNavigate.
 async function selectRadioByLabelText(page, targetText, description, log = defaultLogger) {
+  // Step 1: Just CHECK the radio button — don't click the label (which auto-submits)
   const selected = await safeEvaluate(page, (target) => {
     const labels = document.querySelectorAll('form.picker label, .selection-list label');
     for (const label of labels) {
@@ -174,7 +177,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
         if (radio) {
           radio.checked = true;
           radio.dispatchEvent(new Event('change', { bubbles: true }));
-          label.click();
+          // DO NOT call label.click() — it triggers navigation and destroys context
           return text;
         }
       }
@@ -197,7 +200,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
         if (radio) {
           radio.checked = true;
           radio.dispatchEvent(new Event('change', { bubbles: true }));
-          label.click();
+          // DO NOT call label.click()
           return text;
         }
       }
