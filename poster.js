@@ -31,12 +31,19 @@ const TYPE_MAP = {
   'collectibles': 'for sale by owner',
   'housing': 'housing offered',
   'real-estate': 'for sale by owner',
+  'services': 'service offered',
+  'service': 'service offered',
 };
 
 // Default logger (overridden when called from server.js)
 const defaultLogger = { log: console.log, error: console.error };
 
-// Robust helper: wait for selector then return element, throws with context on failure
+// Delay helper
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Robust helper: wait for selector then return element
 async function waitAndGet(page, selector, description, timeout = 15000) {
   try {
     await page.waitForSelector(selector, { visible: true, timeout });
@@ -64,55 +71,76 @@ async function findContinueButton(page) {
   return null;
 }
 
-// Click and wait for navigation using Promise.all to catch the nav event
-async function clickAndNavigate(page, clickFn, description = 'navigation', timeout = 20000, log = defaultLogger) {
-  log.log(`Clicking for ${description}...`);
-  try {
-    // Start navigation wait BEFORE clicking, so we catch the navigation
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout }),
-      clickFn()
-    ]);
-  } catch (e) {
-    // Navigation might have already completed or not triggered
-    log.log(`Navigation for ${description}: ${e.message}`);
-  }
-  // Wait for network to settle
-  try {
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 });
-  } catch (e) {
-    // Already idle
-  }
-  // Ensure the new page's DOM is ready
-  try {
-    await page.waitForSelector('body', { timeout: 10000 });
-  } catch (e) {
-    log.log(`Body selector wait failed: ${e.message}`);
-  }
-  // Extra delay for CL's JS to initialize
-  await delay(1500);
-  // Verify we have a valid context
-  await ensurePageContext(page, log);
-}
-
-// Ensure page context is still valid after navigation (prevents stale handle errors)
-// Now retries 3 times with increasing delay
-async function ensurePageContext(page, log = defaultLogger) {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+// Safe page.evaluate with retries — the core fix for stale context errors.
+// After CL navigation, the execution context can take time to stabilize.
+// This retries page.evaluate() calls instead of failing immediately.
+async function safeEvaluate(page, fn, args, log = defaultLogger, retries = 5) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await page.mainFrame().executionContext();
-      return true;
+      if (args !== undefined) {
+        return await page.evaluate(fn, args);
+      }
+      return await page.evaluate(fn);
     } catch (e) {
-      log.log(`Page context lost (attempt ${attempt}/3), waiting...`);
-      await delay(attempt * 1000);
+      const msg = e.message || '';
+      if (msg.includes('Cannot find context') || msg.includes('Execution context') || msg.includes('Protocol error')) {
+        log.log(`safeEvaluate attempt ${attempt}/${retries} failed: ${msg.substring(0, 80)}`);
+        if (attempt < retries) {
+          await delay(1000 + attempt * 500); // increasing backoff: 1.5s, 2s, 2.5s, 3s
+          continue;
+        }
+      }
+      throw e; // Non-context error or exhausted retries — rethrow
     }
   }
-  throw new Error('Page context is not accessible after 3 retries');
+}
+
+// Navigate to a new page by clicking, then wait for it to fully stabilize.
+// Instead of Promise.all (which can still race), we use a simpler approach:
+// click, then poll until the URL changes and page.evaluate works.
+async function clickAndNavigate(page, clickFn, description = 'navigation', timeout = 25000, log = defaultLogger) {
+  const urlBefore = page.url();
+  log.log(`Clicking for ${description} (current URL: ${urlBefore})...`);
+  
+  // Click the button
+  await clickFn();
+  
+  // Wait for URL to change (CL wizard always changes the ?s= param)
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    await delay(500);
+    const currentUrl = page.url();
+    if (currentUrl !== urlBefore) {
+      log.log(`URL changed to: ${currentUrl}`);
+      break;
+    }
+  }
+  
+  // Now wait for the new page's DOM to be ready
+  // Use a polling approach instead of waitForNavigation which can race
+  for (let i = 0; i < 10; i++) {
+    try {
+      await page.waitForSelector('body', { timeout: 3000 });
+      // Verify we can actually run JS in the page context
+      const title = await page.title();
+      if (title) {
+        log.log(`Page ready: "${title}"`);
+        break;
+      }
+    } catch (e) {
+      log.log(`Waiting for page to stabilize (${i + 1}/10)...`);
+      await delay(1000);
+    }
+  }
+  
+  // Final settle delay for CL's JS
+  await delay(2000);
 }
 
 // Select a radio button by matching label text (case-insensitive, trimmed)
+// Uses safeEvaluate to handle stale contexts
 async function selectRadioByLabelText(page, targetText, description, log = defaultLogger) {
-  const selected = await page.evaluate((target) => {
+  const selected = await safeEvaluate(page, (target) => {
     const labels = document.querySelectorAll('form.picker label, .selection-list label');
     for (const label of labels) {
       const text = label.textContent.trim().toLowerCase();
@@ -127,7 +155,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
       }
     }
     return null;
-  }, targetText);
+  }, targetText, log);
 
   if (selected) {
     log.log(`Selected ${description}: "${selected}"`);
@@ -135,7 +163,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
   }
 
   // Fallback: partial match
-  const partial = await page.evaluate((target) => {
+  const partial = await safeEvaluate(page, (target) => {
     const labels = document.querySelectorAll('form.picker label, .selection-list label');
     for (const label of labels) {
       const text = label.textContent.trim().toLowerCase();
@@ -150,7 +178,7 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
       }
     }
     return null;
-  }, targetText);
+  }, targetText, log);
 
   if (partial) {
     log.log(`Selected ${description} (partial match): "${partial}"`);
@@ -159,11 +187,6 @@ async function selectRadioByLabelText(page, targetText, description, log = defau
 
   log.log(`Could not find ${description} matching "${targetText}"`);
   return false;
-}
-
-// Delay helper
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function downloadImage(url, destPath) {
@@ -178,9 +201,9 @@ async function downloadImage(url, destPath) {
   return destPath;
 }
 
-// Detect which wizard stage we're on by checking body class or page title
-async function detectStage(page) {
-  return await page.evaluate(() => {
+// Detect which wizard stage we're on — uses safeEvaluate for resilience
+async function detectStage(page, log = defaultLogger) {
+  return await safeEvaluate(page, () => {
     const body = document.body;
     const classes = body.className || '';
     const stages = ['copyfromanother', 'subarea', 'hood', 'type', 'cat', 'edit', 'geoverify', 'editimage', 'preview', 'finalize'];
@@ -198,7 +221,7 @@ async function detectStage(page) {
     if (title.includes('verify')) return 'geoverify';
     if (title.includes('preview')) return 'preview';
     return 'unknown';
-  });
+  }, undefined, log);
 }
 
 // Capture debug info from current page for error context
@@ -210,7 +233,6 @@ async function capturePageDebug(page, log) {
     log.error(`[DEBUG] URL: ${url}`);
     log.error(`[DEBUG] Title: ${title}`);
     log.error(`[DEBUG] Body: ${bodyText}`);
-    // Save screenshot to tmp for debugging
     const screenshotPath = path.join(os.tmpdir(), `cl-error-${Date.now()}.png`);
     await page.screenshot({ path: screenshotPath, fullPage: false }).catch(() => {});
     log.error(`[DEBUG] Screenshot saved: ${screenshotPath}`);
@@ -226,11 +248,12 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const cityInfo = CITY_MAP[cityKey] || CITY_MAP['orangecounty'];
   const baseUrl = cityInfo.base;
   const areaCode = cityInfo.code;
-  const postingType = TYPE_MAP[category] || TYPE_MAP[category?.toLowerCase()] || 'for sale by owner';
+  const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
 
   const launchArgs = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
     '--window-size=1280,900', '--disable-blink-features=AutomationControlled',
+    '--disable-features=site-per-process', // Prevent cross-process iframes from creating context issues
   ];
   if (proxyConfig && proxyConfig.host) {
     launchArgs.push(`--proxy-server=${proxyConfig.host}:${proxyConfig.port}`);
@@ -253,7 +276,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     // =========================================================
-    // Step 1: Navigate directly to the CL posting wizard for the target area
+    // Step 1: Navigate directly to the CL posting wizard
     // =========================================================
     await updateJobStatus(jobId, 'processing', 'navigating');
     const postUrl = `https://post.craigslist.org/c/${areaCode}`;
@@ -262,7 +285,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     await delay(2000);
     log.log('Wizard URL:', page.url());
 
-    let stage = await detectStage(page);
+    let stage = await detectStage(page, log);
     log.log('Detected initial stage:', stage);
 
     // =========================================================
@@ -290,12 +313,11 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           const loginBtn = await page.$('button[type="submit"]');
           if (loginBtn) {
             await clickAndNavigate(page, () => loginBtn.click(), 'login submit', 15000, log);
-            await delay(1500);
           }
         }
       }
       log.log('After login URL:', page.url());
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after login:', stage);
     }
 
@@ -313,7 +335,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           await clickAndNavigate(page, () => btn.click(), 'skip copy-from-another', 15000, log);
         }
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after skip:', stage);
     }
 
@@ -332,7 +354,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       if (btn) {
         await clickAndNavigate(page, () => btn.click(), 'subarea continue', 15000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after subarea:', stage);
     }
 
@@ -349,7 +371,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       if (btn) {
         await clickAndNavigate(page, () => btn.click(), 'hood continue', 15000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after hood:', stage);
     }
 
@@ -362,9 +384,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await selectRadioByLabelText(page, postingType, 'posting type', log);
       const btn = await findContinueButton(page);
       if (btn) {
-        await clickAndNavigate(page, () => btn.click(), 'type continue', 20000, log);
+        await clickAndNavigate(page, () => btn.click(), 'type→cat navigation', 25000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after type:', stage);
     }
 
@@ -395,6 +417,8 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           'clothing': 'clothing',
           'collectibles': 'collectibles',
           'real-estate': 'real estate',
+          'services': 'household services',
+          'service': 'household services',
         };
         const alias = catAliases[catKeyword] || catKeyword;
         if (alias !== catKeyword) {
@@ -402,26 +426,24 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         }
       }
       if (!found) {
-        const firstRadio = await page.$('form.picker input[type="radio"]');
-        if (firstRadio) {
-          await page.evaluate(() => {
-            const radio = document.querySelector('form.picker input[type="radio"]');
-            if (radio) {
-              radio.checked = true;
-              radio.dispatchEvent(new Event('change', { bubbles: true }));
-              const label = radio.closest('label');
-              if (label) label.click();
-            }
-          });
-          log.log('Selected first available category as fallback');
-        }
+        // Last resort: select first available radio
+        await safeEvaluate(page, () => {
+          const radio = document.querySelector('form.picker input[type="radio"]');
+          if (radio) {
+            radio.checked = true;
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+            const label = radio.closest('label');
+            if (label) label.click();
+          }
+        }, undefined, log);
+        log.log('Selected first available category as fallback');
       }
 
       const catBtn = await findContinueButton(page);
       if (catBtn) {
-        await clickAndNavigate(page, () => catBtn.click(), 'category continue', 20000, log);
+        await clickAndNavigate(page, () => catBtn.click(), 'category→edit navigation', 25000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after category:', stage);
     }
 
@@ -461,7 +483,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       if (submitBtn) {
         await clickAndNavigate(page, () => submitBtn.click(), 'form submit', 20000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after form submit:', stage);
     }
 
@@ -475,7 +497,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       if (geoBtn) {
         await clickAndNavigate(page, () => geoBtn.click(), 'geoverify continue', 20000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after geoverify:', stage);
     }
 
@@ -544,7 +566,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       if (doneBtn) {
         await clickAndNavigate(page, () => doneBtn.click(), 'done with images', 15000, log);
       }
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after images:', stage);
     }
 
@@ -570,7 +592,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         }
       }
       await delay(1500);
-      stage = await detectStage(page);
+      stage = await detectStage(page, log);
       log.log('Stage after publish:', stage);
     }
 
