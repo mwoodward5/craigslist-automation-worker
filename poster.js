@@ -12,8 +12,10 @@ const CITY_MAP = {
   'inlandempire': { base: 'https://inlandempire.craigslist.org', code: 'iee' },
 };
 
-// Map category to the radio button label text on CL wizard "choose type" page
+// Map category to the radio button label text on CL wizard "choose type" page.
+// Supports both human-readable names AND CL path codes (fso, bfs, cto, etc.)
 const TYPE_MAP = {
+  // Human-readable names
   'for-sale-by-owner': 'for sale by owner',
   'electronics': 'for sale by owner',
   'general': 'for sale by owner',
@@ -33,6 +35,21 @@ const TYPE_MAP = {
   'real-estate': 'for sale by owner',
   'services': 'service offered',
   'service': 'service offered',
+  // CL path codes (sent by frontend)
+  'fso': 'for sale by owner',      // for sale by owner
+  'fsd': 'for sale by dealer',     // for sale by dealer
+  'bfs': 'service offered',        // business/financial services
+  'cto': 'for sale by owner',      // cars & trucks - by owner
+  'ctd': 'for sale by dealer',     // cars & trucks - by dealer
+  'mco': 'for sale by owner',      // motorcycles - by owner
+  'mcd': 'for sale by dealer',     // motorcycles - by dealer
+  'apa': 'housing offered',        // apartments / housing for rent
+  'hou': 'housing offered',        // housing
+  'rea': 'housing offered',        // real estate
+  'gig': 'gig offered',            // gigs
+  'com': 'community',              // community
+  'eve': 'event / class',          // events
+  'rid': 'community',              // rideshare
 };
 
 // Default logger (overridden when called from server.js)
@@ -65,7 +82,12 @@ async function findContinueButton(page) {
         const style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
       });
-      if (isVisible) return btn;
+      if (isVisible) {
+        // Scroll button into view to ensure it's clickable (CL forms can be long)
+        await btn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+        await new Promise(r => setTimeout(r, 300));
+        return btn;
+      }
     }
   }
   return null;
@@ -430,13 +452,14 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       let found = await selectRadioByLabelText(page, catKeyword, 'category', log);
       if (!found) {
         const catAliases = {
+          // Human-readable category names
           'electronics': 'electronics',
           'computer': 'computers',
           'furniture': 'furniture',
           'auto-parts': 'auto parts',
           'cell-phones': 'cell phones',
-          'general': 'general',
-          'for-sale-by-owner': 'general',
+          'general': 'general for sale',
+          'for-sale-by-owner': 'general for sale',
           'bicycles': 'bicycles',
           'bikes': 'bicycles',
           'bicycle': 'bicycles',
@@ -448,6 +471,14 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           'real-estate': 'real estate',
           'services': 'household services',
           'service': 'household services',
+          // CL path codes (sent by frontend)
+          'fso': 'general for sale',
+          'bfs': 'household services',
+          'cto': 'cars & trucks',
+          'ctd': 'cars & trucks',
+          'mco': 'motorcycles/scooters',
+          'mcd': 'motorcycles/scooters',
+          'apa': 'apts / housing',
         };
         const alias = catAliases[catKeyword] || catKeyword;
         if (alias !== catKeyword) {
@@ -509,7 +540,16 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
       const submitBtn = await findContinueButton(page);
       if (submitBtn) {
-        await clickAndNavigate(page, () => submitBtn.click(), 'form submit', 20000, log);
+        // Use a robust click that falls back to JS click if Puppeteer click fails
+        // (CL's edit form can be long, and the button may not have a proper bounding box)
+        await clickAndNavigate(page, async () => {
+          try {
+            await submitBtn.click();
+          } catch (clickErr) {
+            log.log(`Puppeteer click failed (${clickErr.message.substring(0, 60)}), using JS click fallback`);
+            await submitBtn.evaluate(el => el.click());
+          }
+        }, 'form submit', 20000, log);
       }
       stage = await detectStage(page, log);
       log.log('Stage after form submit:', stage);
