@@ -366,29 +366,48 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
 
-  log.log(`[v2.14.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
-  log.log(`[v2.14.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
-  log.log(`[v2.14.1] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
+  log.log(`[v2.15.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
+  log.log(`[v2.15.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
+  log.log(`[v2.15.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
 
   // ── Resolve proxy credentials ──
   // Frontend sends { state: 'california', sessionType: 'sticky' }.
-  // Decodo proxy geo-targeting uses state.decodo.com for US state-level targeting.
-  // Docs: https://help.decodo.com/docs/residential-proxy-endpoints-and-ports
-  // State endpoint: state.decodo.com with state-specific sticky ports.
-  const PROXY_STATE_PORTS = {
-    alabama: 17001, alaska: 17101, arizona: 17201, arkansas: 17301,
-    california: 10001, colorado: 17401, connecticut: 17501, delaware: 17601,
-    florida: 11001, georgia: 17701, hawaii: 17801, idaho: 17901,
-    illinois: 12001, indiana: 18001, iowa: 18101, kansas: 18201,
-    kentucky: 18301, louisiana: 18401, maine: 18501, maryland: 18601,
-    massachusetts: 18701, michigan: 18801, minnesota: 18901, mississippi: 19001,
-    missouri: 19101, montana: 19201, nebraska: 19301, nevada: 19401,
-    new_hampshire: 19501, new_jersey: 19601, new_mexico: 19701, new_york: 13001,
-    north_carolina: 19801, north_dakota: 19901, ohio: 20001, oklahoma: 20101,
-    oregon: 20201, pennsylvania: 20301, rhode_island: 20401, south_carolina: 20501,
-    south_dakota: 20601, tennessee: 20701, texas: 14001, utah: 20801,
-    vermont: 20901, virginia: 15001, washington: 16001, west_virginia: 21001,
-    wisconsin: 21101, wyoming: 21201, district_of_columbia: 17601,
+  // Decodo proxy geo-targeting uses USERNAME PARAMETERS on gate.decodo.com:7000.
+  // Docs: https://help.decodo.com/docs/residential-proxy-user-pass-requests
+  // Format: user-USERNAME-country-us-state-us_STATE-session-SESSIONID-sessionduration-30
+  // This is the ONLY reliable method — state.decodo.com endpoint does NOT work.
+
+  // Map state names to Decodo state parameter format (us_statename)
+  const DECODO_STATE_MAP = {
+    alabama: 'us_alabama', alaska: 'us_alaska', arizona: 'us_arizona', arkansas: 'us_arkansas',
+    california: 'us_california', colorado: 'us_colorado', connecticut: 'us_connecticut', delaware: 'us_delaware',
+    florida: 'us_florida', georgia: 'us_georgia', hawaii: 'us_hawaii', idaho: 'us_idaho',
+    illinois: 'us_illinois', indiana: 'us_indiana', iowa: 'us_iowa', kansas: 'us_kansas',
+    kentucky: 'us_kentucky', louisiana: 'us_louisiana', maine: 'us_maine', maryland: 'us_maryland',
+    massachusetts: 'us_massachusetts', michigan: 'us_michigan', minnesota: 'us_minnesota', mississippi: 'us_mississippi',
+    missouri: 'us_missouri', montana: 'us_montana', nebraska: 'us_nebraska', nevada: 'us_nevada',
+    new_hampshire: 'us_new_hampshire', new_jersey: 'us_new_jersey', new_mexico: 'us_new_mexico', new_york: 'us_new_york',
+    north_carolina: 'us_north_carolina', north_dakota: 'us_north_dakota', ohio: 'us_ohio', oklahoma: 'us_oklahoma',
+    oregon: 'us_oregon', pennsylvania: 'us_pennsylvania', rhode_island: 'us_rhode_island', south_carolina: 'us_south_carolina',
+    south_dakota: 'us_south_dakota', tennessee: 'us_tennessee', texas: 'us_texas', utah: 'us_utah',
+    vermont: 'us_vermont', virginia: 'us_virginia', washington: 'us_washington', west_virginia: 'us_west_virginia',
+    wisconsin: 'us_wisconsin', wyoming: 'us_wyoming', district_of_columbia: 'us_district_of_columbia',
+  };
+
+  // Map CL city subdomains to target cities for city-level proxy targeting
+  const CL_CITY_TO_PROXY_CITY = {
+    losangeles: 'los_angeles', sfbay: 'san_francisco', sandiego: 'san_diego',
+    orangecounty: 'los_angeles', inlandempire: 'los_angeles',
+    newyork: 'new_york', chicago: 'chicago', houston: 'houston',
+    dallas: 'dallas', miami: 'miami', atlanta: 'atlanta', seattle: 'seattle',
+    boston: 'boston', phoenix: 'phoenix', denver: 'denver', portland: 'portland',
+    detroit: 'detroit', minneapolis: 'minneapolis', philadelphia: 'philadelphia',
+    washingtondc: 'washington', sacramento: 'sacramento', austin: 'austin',
+    nashville: 'nashville', tampa: 'tampa', orlando: 'orlando',
+    charlotte: 'charlotte', columbus: 'columbus', cleveland: 'cleveland',
+    pittsburgh: 'pittsburgh', indianapolis: 'indianapolis', sanantonio: 'san_antonio',
+    stlouis: 'saint_louis', kansascity: 'kansas_city', raleigh: 'raleigh',
+    jacksonville: 'jacksonville', lasvegas: 'las_vegas',
   };
 
   let resolvedProxy = null;
@@ -396,15 +415,33 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     // Already resolved (host/port/username/password) — use as-is
     resolvedProxy = proxyConfig;
   } else if (proxyConfig && proxyConfig.state) {
-    // Frontend sent { state, sessionType } — build Decodo credentials
+    // Frontend sent { state, sessionType } — build Decodo credentials with username parameters
     const proxyUser = process.env.DECODO_PROXY_USER;
     const proxyPass = process.env.DECODO_PROXY_PASS;
     if (proxyUser && proxyPass) {
       const stateKey = (proxyConfig.state || 'california').toLowerCase().replace(/ /g, '_');
-      const port = PROXY_STATE_PORTS[stateKey] || 10001;
-      // Use state.decodo.com for US state-level geo-targeting (NOT gate.decodo.com)
-      resolvedProxy = { host: 'state.decodo.com', port, username: proxyUser, password: proxyPass };
-      log.log(`[PROXY] Decodo state targeting: state.decodo.com:${port} for "${proxyConfig.state}"`);
+      const decodoPart = DECODO_STATE_MAP[stateKey] || 'us_california';
+      // Generate a unique session ID for sticky sessions (CL needs consistent IP during posting)
+      const sessionId = `adclimber_${jobId || Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      // Build the full username with geo-targeting parameters
+      // Format: user-PROXYUSER-country-us-state-STATE-session-SESSIONID-sessionduration-30
+      let usernameParams = `user-${proxyUser}-country-us-state-${decodoPart}`;
+      // Add city-level targeting if we can map the target CL city
+      const proxyCity = CL_CITY_TO_PROXY_CITY[(cityKey || '').toLowerCase()];
+      if (proxyCity) {
+        usernameParams += `-city-${proxyCity}`;
+        log.log(`[PROXY] Adding city-level targeting: ${proxyCity}`);
+      }
+      usernameParams += `-session-${sessionId}-sessionduration-30`;
+      resolvedProxy = {
+        host: 'gate.decodo.com',
+        port: 7000,
+        username: usernameParams,
+        password: proxyPass
+      };
+      log.log(`[PROXY] Decodo username-param targeting: gate.decodo.com:7000`);
+      log.log(`[PROXY] Username: ${usernameParams.substring(0, 80)}...`);
+      log.log(`[PROXY] State: ${decodoPart}, City: ${proxyCity || 'none'}, Session: ${sessionId}`);
     } else {
       log.log(`[PROXY] WARNING — proxyConfig has state "${proxyConfig.state}" but DECODO env vars missing! user=${!!proxyUser} pass=${!!proxyPass}`);
     }
@@ -438,6 +475,25 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     }
     page.setDefaultTimeout(30000);
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    // ── Verify proxy IP location before posting ──
+    if (resolvedProxy && resolvedProxy.host) {
+      try {
+        log.log('[PROXY] Verifying IP geolocation...');
+        await page.goto('https://ip.decodo.com/json', { waitUntil: 'networkidle2', timeout: 15000 });
+        const ipInfo = await page.evaluate(() => {
+          try { return JSON.parse(document.body.innerText); } catch { return { raw: document.body.innerText.substring(0, 500) }; }
+        });
+        log.log(`[PROXY] IP check result: ${JSON.stringify(ipInfo).substring(0, 300)}`);
+        if (ipInfo.country && !ipInfo.country.toLowerCase().includes('us') && ipInfo.country_code !== 'US') {
+          log.log(`[PROXY] WARNING: IP is in ${ipInfo.country} (${ipInfo.country_code}), NOT in US! Proxy geo-targeting may not be working.`);
+        } else {
+          log.log(`[PROXY] Confirmed: IP located in ${ipInfo.city || 'unknown city'}, ${ipInfo.region || ipInfo.state || 'unknown state'}, ${ipInfo.country || 'unknown country'}`);
+        }
+      } catch (ipErr) {
+        log.log(`[PROXY] IP verification failed (non-fatal): ${ipErr.message.substring(0, 100)}`);
+      }
+    }
 
     // =========================================================
     // Step 1: Navigate directly to the CL posting wizard
