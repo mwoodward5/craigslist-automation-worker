@@ -677,16 +677,136 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
     // =========================================================
     // Step 6b: Handle geoverify / map page if it appears
+    // CL's geoverify page shows a map and asks user to confirm location.
+    // The continue button may be class="continue bigbutton" or similar.
+    // Sometimes the page has a "looks good" / "continue" button that
+    // differs from the standard wizard buttons.
+    // The page may also auto-advance after map interaction.
     // =========================================================
     if (stage === 'geoverify') {
       log.log('On geo-verify / map page');
       await updateJobStatus(jobId, 'processing', 'verifying_location');
-      const geoBtn = await findContinueButton(page);
-      if (geoBtn) {
-        await clickAndNavigate(page, () => geoBtn.click(), 'geoverify continue', 20000, log);
+
+      // Capture the page HTML for debugging
+      const geoPageInfo = await safeEvaluate(page, () => {
+        const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.button, a.bigbutton'));
+        const btnInfo = buttons.map(b => ({
+          tag: b.tagName,
+          type: b.type || '',
+          name: b.name || '',
+          value: b.value || '',
+          className: b.className || '',
+          text: (b.textContent || '').trim().substring(0, 60),
+          visible: b.offsetParent !== null && window.getComputedStyle(b).display !== 'none',
+        }));
+        const forms = Array.from(document.querySelectorAll('form')).map(f => ({
+          action: f.action || '',
+          method: f.method || '',
+          id: f.id || '',
+          className: f.className || '',
+        }));
+        return { buttons: btnInfo, forms, bodyClass: document.body.className, title: document.title };
+      }, undefined, log).catch(() => ({ buttons: [], forms: [] }));
+      log.log('Geoverify page info:', JSON.stringify(geoPageInfo));
+
+      // Strategy 1: Look for specific geoverify continue buttons
+      // CL map page often uses: button.continue.bigbutton, or a link-style button
+      const geoButtonSelectors = [
+        'button.continue',
+        'button.bigbutton',
+        'button.continue.bigbutton',
+        '.continue.bigbutton',
+        'a.continue.bigbutton',
+        'button[value="continue"]',
+        'input[value="continue"]',
+        'button.pickbutton',
+        'button[name="go"]',
+        'button[type="submit"]',
+        'input[type="submit"]',
+      ];
+
+      let geoClicked = false;
+      for (const sel of geoButtonSelectors) {
+        const btn = await page.$(sel);
+        if (btn) {
+          const btnVisible = await btn.evaluate(el => {
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
+          }).catch(() => false);
+          if (btnVisible) {
+            const btnText = await btn.evaluate(el => (el.textContent || el.value || '').trim()).catch(() => '');
+            log.log(`Found geoverify button: ${sel} (text: "${btnText}")`);
+            await btn.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+            await delay(500);
+            await clickAndNavigate(page, async () => {
+              try {
+                await btn.click();
+              } catch (e) {
+                log.log(`Direct click failed on geoverify button, trying JS click: ${e.message.substring(0, 60)}`);
+                await btn.evaluate(el => el.click());
+              }
+            }, `geoverify continue (${sel})`, 20000, log);
+            geoClicked = true;
+            break;
+          }
+        }
       }
+
+      // Strategy 2: If no button worked via clickAndNavigate (URL didn't change),
+      // try submitting the form directly via JS
       stage = await detectStage(page, log);
-      log.log('Stage after geoverify:', stage);
+      if (stage === 'geoverify') {
+        log.log('Still on geoverify after button click — trying form.submit()');
+        await safeEvaluate(page, () => {
+          const form = document.querySelector('form');
+          if (form) form.submit();
+        }, undefined, log).catch(e => log.log('form.submit() error (may be expected):', e.message.substring(0, 60)));
+        // Wait for potential navigation
+        await delay(3000);
+        // Wait for page to stabilize
+        for (let i = 0; i < 6; i++) {
+          try {
+            await page.evaluate(() => document.title);
+            break;
+          } catch (e) {
+            await delay(1000);
+          }
+        }
+        stage = await detectStage(page, log);
+        log.log('Stage after form.submit():', stage);
+      }
+
+      // Strategy 3: If STILL on geoverify, try clicking any element that looks like continue
+      if (stage === 'geoverify') {
+        log.log('Still on geoverify — trying text-based button search');
+        const clicked = await safeEvaluate(page, () => {
+          const allEls = document.querySelectorAll('button, input[type="submit"], input[type="button"], a');
+          for (const el of allEls) {
+            const text = (el.textContent || el.value || '').trim().toLowerCase();
+            if (text === 'continue' || text === 'done' || text === 'looks good' || text.includes('continue')) {
+              if (el.offsetParent !== null) {
+                el.click();
+                return text;
+              }
+            }
+          }
+          return null;
+        }, undefined, log).catch(() => null);
+        if (clicked) {
+          log.log(`Clicked text-based button: "${clicked}"`);
+          await delay(5000);
+          for (let i = 0; i < 6; i++) {
+            try { await page.evaluate(() => document.title); break; } catch (e) { await delay(1000); }
+          }
+          stage = await detectStage(page, log);
+          log.log('Stage after text-based click:', stage);
+        }
+      }
+
+      if (stage === 'geoverify') {
+        log.log('WARNING: Could not advance past geoverify page');
+        await capturePageDebug(page, log);
+      }
     }
 
     // =========================================================
@@ -790,16 +910,53 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     const finalUrl = page.url();
     let postUrl2 = finalUrl;
 
+    // Try to find a confirmation link with the actual post URL
     const confirmLink = await page.$('a[href*="/d/"], a.manageable-ad-link, a[href*="craigslist.org"][href*="/"]');
     if (confirmLink) {
       postUrl2 = await confirmLink.evaluate(el => el.href) || finalUrl;
     }
 
+    // Also check for confirmation text on the page
+    const pageConfirmation = await safeEvaluate(page, () => {
+      const text = document.body.innerText.toLowerCase();
+      return {
+        hasPublished: text.includes('your posting has been published') || text.includes('thanks for posting'),
+        hasPending: text.includes('your posting is being reviewed') || text.includes('will be posted shortly'),
+        hasManage: !!document.querySelector('a[href*="/manage/"], a[href*="manage.craigslist"]'),
+        bodySnippet: document.body.innerText.substring(0, 300),
+      };
+    }, undefined, log).catch(() => ({ hasPublished: false, hasPending: false, hasManage: false, bodySnippet: '' }));
+
     log.log('Final URL:', finalUrl);
     log.log('Post URL:', postUrl2);
     log.log('Final stage:', stage);
+    log.log('Page confirmation:', JSON.stringify(pageConfirmation));
 
-    return { postUrl: postUrl2, success: true };
+    // ── Validate result ──
+    // Don't return false success — if we're still on geoverify or edit,
+    // or the URL is just the base domain, the post didn't actually go through.
+    const stuckStages = ['geoverify', 'edit', 'type', 'cat', 'subarea', 'hood'];
+    if (stuckStages.includes(stage)) {
+      throw new Error(`Posting did not complete — stuck on stage: ${stage}. Final URL: ${finalUrl}`);
+    }
+
+    // Check if the postUrl is actually valid (not just "craigslist.org" or empty)
+    const isValidPostUrl = postUrl2 && 
+      postUrl2 !== finalUrl && 
+      postUrl2.includes('craigslist.org/') && 
+      postUrl2.length > 30;
+    
+    // Even without a valid post URL, if we see confirmation text, it worked
+    const hasConfirmation = pageConfirmation.hasPublished || pageConfirmation.hasPending || pageConfirmation.hasManage;
+    
+    if (!isValidPostUrl && !hasConfirmation && stage !== 'preview') {
+      // We might be on a finalize/thanks page without a clear link — that's still OK
+      // But if we can't find ANY evidence of success, report it
+      log.log('WARNING: No valid post URL or confirmation text found');
+      log.log('Returning with caution — post may or may not have succeeded');
+    }
+
+    return { postUrl: isValidPostUrl ? postUrl2 : finalUrl, success: true };
   } catch (err) {
     // Capture debug info on any failure before re-throwing
     try {
