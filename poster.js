@@ -368,6 +368,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
   log.log(`[v2.14.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
   log.log(`[v2.14.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
+  log.log(`[v2.14.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
 
   const launchArgs = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
@@ -1175,57 +1176,57 @@ async function fillField(page, selector, value, fieldName, log = defaultLogger) 
   try {
     const el = await page.$(selector);
     if (el) {
-      // Step 1: Scroll into view and focus via JS (more reliable than click)
-      await el.evaluate(e => {
-        e.scrollIntoView({ block: 'center', behavior: 'instant' });
-        e.focus();
-      });
-      await delay(200);
+      // Step 1: Scroll into view
+      await el.evaluate(e => e.scrollIntoView({ block: 'center', behavior: 'instant' }));
+      await delay(150 + Math.random() * 200);
 
-      // Step 2: Select all existing text and delete it
-      // Use keyboard shortcuts which are more reliable than triple-click
+      // Step 2: CLICK the field with the mouse (not JS focus — CL checks for mouse events)
+      await el.click();
+      await delay(100 + Math.random() * 150);
+
+      // Step 3: Select all existing text and delete it
       await page.keyboard.down('Control');
       await page.keyboard.press('a');
       await page.keyboard.up('Control');
       await page.keyboard.press('Backspace');
+      await delay(80 + Math.random() * 100);
+
+      // Step 4: Strip emojis/special unicode — CL only accepts plain text in form fields.
+      // Emojis trigger execCommand fallback which CL detects as "autofilled".
+      const cleanValue = value.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}\u{2764}\u{FE0F}\u{20E3}\u{2B50}\u{2705}\u{274C}\u{2728}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}]/gu, '').replace(/  +/g, ' ');
+
+      // Step 5: Type with Puppeteer's type() — fires real keydown/keypress/input/keyup per char
+      // Use a human-like delay between keystrokes (15-40ms)
+      await el.type(cleanValue, { delay: 15 + Math.floor(Math.random() * 25) });
+
+      // Step 6: Blur the field (simulate tabbing away — triggers change events)
+      await delay(100 + Math.random() * 150);
+      await page.keyboard.press('Tab');
       await delay(100);
 
-      // Step 3: Type or insert the value
-      // Check for emoji/complex unicode that type() can't handle
-      const hasEmoji = /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}]/u.test(value);
-
-      if (!hasEmoji) {
-        // Use Puppeteer type() for all plain text — most natural, CL accepts it
-        await el.type(value, { delay: 5 });
-      } else {
-        // For text with emojis: use execCommand('insertText') which fires
-        // real input events (unlike .value=) and handles unicode correctly
-        await el.evaluate((e, val) => {
-          e.focus();
-          document.execCommand('insertText', false, val);
-        }, value);
-      }
-
-      // Step 4: Verify the value was set
+      // Step 7: Verify the value was set
       const actualValue = await el.evaluate(e => e.value || e.textContent || '');
-      if (actualValue.length === 0 && value.length > 0) {
-        log.log(`WARNING: ${fieldName} appears empty after fill, retrying with type()...`);
-        await el.evaluate(e => { e.focus(); e.value = ''; });
-        await el.type(value, { delay: 5 });
+      if (actualValue.length === 0 && cleanValue.length > 0) {
+        log.log(`WARNING: ${fieldName} appears empty after fill, retrying...`);
+        await el.click();
+        await delay(200);
+        await el.type(cleanValue, { delay: 20 });
       }
 
-      log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
+      log.log(`Filled ${fieldName}: "${cleanValue.substring(0, 50)}${cleanValue.length > 50 ? '...' : ''}"`);
     } else {
       log.log(`Field not found: ${fieldName} (${selector})`);
     }
   } catch (err) {
     log.log(`ERROR filling ${fieldName}: ${err.message.substring(0, 120)}`);
-    // Last resort fallback: try type() directly
+    // Last resort fallback
     try {
       const el = await page.$(selector);
       if (el) {
-        await el.evaluate(e => { e.focus(); e.value = ''; });
-        await el.type(value, { delay: 5 });
+        await el.click();
+        await delay(200);
+        const cleanValue = value.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}]/gu, '');
+        await el.type(cleanValue, { delay: 20 });
         log.log(`Filled ${fieldName} via fallback type()`);
       }
     } catch (e2) {

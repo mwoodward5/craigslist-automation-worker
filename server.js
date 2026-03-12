@@ -22,7 +22,7 @@ if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
 // In-memory log ring buffer
 // =========================================================
 const logBuffer = [];
-const MAX_LOGS = 200;
+const MAX_LOGS = 500;
 
 function addLog(level, ...args) {
   const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
@@ -114,6 +114,7 @@ app.post('/test-post', async (req, res) => {
 // =========================================================
 async function handlePostJob(req, res) {
   const { jobId, adData, proxyConfig, targetCity, credentials } = req.body;
+  logger.log(`[SERVER] Job received: jobId=${jobId}, city=${targetCity}, proxy=${JSON.stringify(proxyConfig || 'NONE').substring(0, 200)}`);
   if (!adData) return res.status(400).json({ error: 'adData is required' });
 
   res.json({ success: true, message: 'Job accepted', jobId });
