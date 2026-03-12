@@ -333,8 +333,8 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
 
-  log.log(`[v2.13.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
-  log.log(`[v2.13.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
+  log.log(`[v2.13.1] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
+  log.log(`[v2.13.1] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
 
   const launchArgs = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
@@ -343,6 +343,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   ];
   if (proxyConfig && proxyConfig.host) {
     launchArgs.push(`--proxy-server=${proxyConfig.host}:${proxyConfig.port}`);
+    log.log(`[PROXY] Active — ${proxyConfig.host}:${proxyConfig.port} (user: ${proxyConfig.username ? 'yes' : 'no'})`);
+  } else {
+    log.log('[PROXY] WARNING — No proxy configured! CL will geolocate to Railway datacenter IP. Posts may redirect to wrong region.');
   }
 
   const browser = await puppeteer.launch({ headless: 'new', args: launchArgs, defaultViewport: { width: 1280, height: 900 } });
