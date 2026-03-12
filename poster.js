@@ -372,22 +372,23 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
   // ── Resolve proxy credentials ──
   // Frontend sends { state: 'california', sessionType: 'sticky' }.
-  // Worker must build Decodo proxy credentials from env vars.
+  // Decodo proxy geo-targeting uses state.decodo.com for US state-level targeting.
+  // Docs: https://help.decodo.com/docs/residential-proxy-endpoints-and-ports
+  // State endpoint: state.decodo.com with state-specific sticky ports.
   const PROXY_STATE_PORTS = {
-    california: 10001, texas: 10002, florida: 10003, new_york: 10004,
-    illinois: 10005, ohio: 10006, georgia: 10007, pennsylvania: 10008,
-    north_carolina: 10009, michigan: 10010, washington: 10011,
-    arizona: 10012, massachusetts: 10013, tennessee: 10014, indiana: 10015,
-    missouri: 10016, maryland: 10017, wisconsin: 10018, colorado: 10019,
-    minnesota: 10020, south_carolina: 10021, alabama: 10022,
-    louisiana: 10023, kentucky: 10024, oregon: 10025, oklahoma: 10026,
-    connecticut: 10027, utah: 10028, iowa: 10029, nevada: 10030,
-    arkansas: 10031, mississippi: 10032, kansas: 10033, new_mexico: 10034,
-    nebraska: 10035, idaho: 10036, west_virginia: 10037, hawaii: 10038,
-    new_hampshire: 10039, maine: 10040, montana: 10041, rhode_island: 10042,
-    delaware: 10043, south_dakota: 10044, north_dakota: 10045,
-    alaska: 10046, vermont: 10047, wyoming: 10048, district_of_columbia: 10049,
-    virginia: 10050, new_jersey: 10051,
+    alabama: 17001, alaska: 17101, arizona: 17201, arkansas: 17301,
+    california: 10001, colorado: 17401, connecticut: 17501, delaware: 17601,
+    florida: 11001, georgia: 17701, hawaii: 17801, idaho: 17901,
+    illinois: 12001, indiana: 18001, iowa: 18101, kansas: 18201,
+    kentucky: 18301, louisiana: 18401, maine: 18501, maryland: 18601,
+    massachusetts: 18701, michigan: 18801, minnesota: 18901, mississippi: 19001,
+    missouri: 19101, montana: 19201, nebraska: 19301, nevada: 19401,
+    new_hampshire: 19501, new_jersey: 19601, new_mexico: 19701, new_york: 13001,
+    north_carolina: 19801, north_dakota: 19901, ohio: 20001, oklahoma: 20101,
+    oregon: 20201, pennsylvania: 20301, rhode_island: 20401, south_carolina: 20501,
+    south_dakota: 20601, tennessee: 20701, texas: 14001, utah: 20801,
+    vermont: 20901, virginia: 15001, washington: 16001, west_virginia: 21001,
+    wisconsin: 21101, wyoming: 21201, district_of_columbia: 17601,
   };
 
   let resolvedProxy = null;
@@ -396,16 +397,16 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     resolvedProxy = proxyConfig;
   } else if (proxyConfig && proxyConfig.state) {
     // Frontend sent { state, sessionType } — build Decodo credentials
-    const proxyHost = process.env.DECODO_PROXY_HOST;
     const proxyUser = process.env.DECODO_PROXY_USER;
     const proxyPass = process.env.DECODO_PROXY_PASS;
-    if (proxyHost && proxyUser && proxyPass) {
+    if (proxyUser && proxyPass) {
       const stateKey = (proxyConfig.state || 'california').toLowerCase().replace(/ /g, '_');
       const port = PROXY_STATE_PORTS[stateKey] || 10001;
-      resolvedProxy = { host: proxyHost, port, username: proxyUser, password: proxyPass };
-      log.log(`[PROXY] Built Decodo creds from state "${proxyConfig.state}" → port ${port}`);
+      // Use state.decodo.com for US state-level geo-targeting (NOT gate.decodo.com)
+      resolvedProxy = { host: 'state.decodo.com', port, username: proxyUser, password: proxyPass };
+      log.log(`[PROXY] Decodo state targeting: state.decodo.com:${port} for "${proxyConfig.state}"`);
     } else {
-      log.log(`[PROXY] WARNING — proxyConfig has state "${proxyConfig.state}" but DECODO env vars missing! host=${!!proxyHost} user=${!!proxyUser} pass=${!!proxyPass}`);
+      log.log(`[PROXY] WARNING — proxyConfig has state "${proxyConfig.state}" but DECODO env vars missing! user=${!!proxyUser} pass=${!!proxyPass}`);
     }
   }
 
