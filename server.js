@@ -58,15 +58,18 @@ app.get('/health', (req, res) => {
 // /debug endpoint — returns env status and recent logs
 // =========================================================
 app.get('/debug', (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
   res.json({
     version: VERSION,
     env: {
       SUPABASE_URL: !!process.env.SUPABASE_URL,
       SUPABASE_SERVICE_KEY: !!process.env.SUPABASE_SERVICE_KEY,
-      CL_EMAIL: !!process.env.CL_EMAIL,
-      CL_PASSWORD: !!process.env.CL_PASSWORD,
+      DECODO_PROXY_HOST: !!process.env.DECODO_PROXY_HOST,
+      DECODO_PROXY_USER: !!process.env.DECODO_PROXY_USER,
+      DECODO_PROXY_PASS: !!process.env.DECODO_PROXY_PASS,
     },
-    logs: logBuffer.slice(-20),
+    logCount: logBuffer.length,
+    logs: logBuffer.slice(-limit),
   });
 });
 
