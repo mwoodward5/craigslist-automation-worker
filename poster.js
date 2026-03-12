@@ -277,7 +277,7 @@ async function detectStage(page, log = defaultLogger) {
     const sMatch = url.match(/[?&]s=([a-zA-Z]+)/);
     if (sMatch) {
       const sParam = sMatch[1].toLowerCase();
-      const knownStages = ['copyfromanother', 'subarea', 'hood', 'type', 'cat', 'editimage', 'edit', 'geoverify', 'preview', 'finalize'];
+      const knownStages = ['copyfromanother', 'subarea', 'hood', 'type', 'cat', 'editimage', 'edit', 'geoverify', 'preview', 'finalize', 'loginloop'];
       for (const s of knownStages) {
         if (sParam === s) return s;
       }
@@ -286,7 +286,7 @@ async function detectStage(page, log = defaultLogger) {
     // Fallback: check body class — LONGER names first to avoid substring matches
     const body = document.body;
     const classes = body.className || '';
-    const stages = ['copyfromanother', 'editimage', 'subarea', 'hood', 'type', 'cat', 'geoverify', 'preview', 'finalize', 'edit'];
+    const stages = ['copyfromanother', 'editimage', 'subarea', 'hood', 'type', 'cat', 'geoverify', 'loginloop', 'preview', 'finalize', 'edit'];
     for (const s of stages) {
       if (classes.includes(s)) return s;
     }
@@ -302,6 +302,7 @@ async function detectStage(page, log = defaultLogger) {
     if (title.includes('edit posting') || title.includes('posting details')) return 'edit';
     if (title.includes('verify') || title.includes('add map')) return 'geoverify';
     if (title.includes('preview')) return 'preview';
+    if (title.includes('email confirmation') || title.includes('further action')) return 'loginloop';
     return 'unknown';
   }, undefined, log);
 }
@@ -498,9 +499,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           'cell-phones': 'cell phones',
           'general': 'general for sale',
           'for-sale-by-owner': 'general for sale',
-          'bicycles': 'bicycles - by owner',
-          'bikes': 'bicycles - by owner',
-          'bicycle': 'bicycles - by owner',
+          'bicycles': 'bicycles',
+          'bikes': 'bicycles',
+          'bicycle': 'bicycles',
           'sporting': 'sporting goods',
           'tools': 'tools',
           'appliances': 'appliances',
@@ -941,6 +942,38 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     }
 
     // =========================================================
+    // Step 8b: Handle email verification / loginloop
+    // CL requires email verification when posting from an untrusted IP.
+    // The ad IS submitted but requires clicking a link in email to go live.
+    // Report this as a special status so the frontend can show the right message.
+    // =========================================================
+    if (stage === 'loginloop') {
+      log.log('CL requires email verification (loginloop stage)');
+      await updateJobStatus(jobId, 'processing', 'email_verification');
+
+      // Extract the email address CL sent verification to
+      const verifyInfo = await safeEvaluate(page, () => {
+        const text = document.body.innerText;
+        const emailMatch = text.match(/Email sent to:\s*(\S+@\S+)/i) || text.match(/email.*?([\w.+-]+@[\w.-]+)/i);
+        return {
+          email: emailMatch ? emailMatch[1] : null,
+          bodySnippet: text.substring(0, 300),
+        };
+      }, undefined, log).catch(() => ({ email: null, bodySnippet: '' }));
+      log.log('Email verification info:', JSON.stringify(verifyInfo));
+
+      // Return success with a note about email verification
+      // The ad is submitted, it just needs email confirmation to go live
+      return {
+        postUrl: page.url(),
+        success: true,
+        needsEmailVerification: true,
+        verificationEmail: verifyInfo.email,
+        message: `Ad submitted successfully but requires email verification. CL sent a confirmation email to ${verifyInfo.email || 'the posting email'}. Click the link in that email to publish the ad.`,
+      };
+    }
+
+    // =========================================================
     // Step 9: Extract final URL / confirmation
     // =========================================================
     const finalUrl = page.url();
@@ -1008,24 +1041,40 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 }
 
 // Helper to safely fill a form field
-// Uses evaluate to set value directly — avoids issues with:
-//   - el.type() breaking emoji/unicode sequences
-//   - el.type() being slow on long descriptions
-//   - CL's JS not recognizing programmatic .value changes without events
+// Strategy: click to focus, select-all to clear, then type the value.
+// For long text or text with emojis, use clipboard paste via evaluate.
+// CL detects direct .value= assignment as "autofilled" and rejects it,
+// so we must use Puppeteer's .type() or keyboard input for short fields.
 async function fillField(page, selector, value, fieldName, log = defaultLogger) {
   if (!value) return;
   try {
     const el = await page.$(selector);
     if (el) {
-      // Set value via JS and dispatch events so CL's validation picks it up
-      await el.evaluate((e, val) => {
-        e.focus();
-        e.value = val;
-        // Dispatch events CL listens for
-        e.dispatchEvent(new Event('input', { bubbles: true }));
-        e.dispatchEvent(new Event('change', { bubbles: true }));
-        e.dispatchEvent(new Event('blur', { bubbles: true }));
-      }, value);
+      // Click to focus (scroll into view first)
+      await el.evaluate(e => e.scrollIntoView({ block: 'center', behavior: 'instant' }));
+      await delay(100);
+      await el.click({ clickCount: 3 }); // triple-click to select all existing text
+      await delay(100);
+
+      // For short fields (<100 chars) without complex unicode, use type() for natural input
+      // For long text or text with emojis, use a paste-like approach
+      const hasComplexChars = /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}\u{2328}\u{23CF}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}\u{2934}\u{2935}\u{25AA}-\u{25FE}\u{2B05}-\u{2B07}\u{2B1B}\u{2B1C}\u{2B50}\u{2B55}\u{3030}\u{303D}\u{3297}\u{3299}]/u.test(value);
+
+      if (value.length <= 100 && !hasComplexChars) {
+        // Natural typing for short plain-text fields (title, price, zip, email)
+        await el.type(value, { delay: 10 });
+      } else {
+        // For descriptions with emojis or long text: 
+        // Use execCommand insertText which simulates paste and fires input events
+        await el.evaluate((e, val) => {
+          e.focus();
+          // Select all existing content
+          e.select ? e.select() : document.execCommand('selectAll');
+          // insertText fires input events like real typing, unlike .value=
+          document.execCommand('insertText', false, val);
+        }, value);
+      }
+
       log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
     } else {
       log.log(`Field not found: ${fieldName} (${selector})`);

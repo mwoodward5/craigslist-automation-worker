@@ -11,7 +11,7 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-const VERSION = '2.10.0';
+const VERSION = '2.11.0';
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
@@ -22,7 +22,7 @@ if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
 // In-memory log ring buffer
 // =========================================================
 const logBuffer = [];
-const MAX_LOGS = 50;
+const MAX_LOGS = 200;
 
 function addLog(level, ...args) {
   const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
