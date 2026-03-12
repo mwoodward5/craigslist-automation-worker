@@ -368,16 +368,55 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
   log.log(`[v2.14.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
   log.log(`[v2.14.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
-  log.log(`[v2.14.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
+  log.log(`[v2.14.1] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
+
+  // ── Resolve proxy credentials ──
+  // Frontend sends { state: 'california', sessionType: 'sticky' }.
+  // Worker must build Decodo proxy credentials from env vars.
+  const PROXY_STATE_PORTS = {
+    california: 10001, texas: 10002, florida: 10003, new_york: 10004,
+    illinois: 10005, ohio: 10006, georgia: 10007, pennsylvania: 10008,
+    north_carolina: 10009, michigan: 10010, washington: 10011,
+    arizona: 10012, massachusetts: 10013, tennessee: 10014, indiana: 10015,
+    missouri: 10016, maryland: 10017, wisconsin: 10018, colorado: 10019,
+    minnesota: 10020, south_carolina: 10021, alabama: 10022,
+    louisiana: 10023, kentucky: 10024, oregon: 10025, oklahoma: 10026,
+    connecticut: 10027, utah: 10028, iowa: 10029, nevada: 10030,
+    arkansas: 10031, mississippi: 10032, kansas: 10033, new_mexico: 10034,
+    nebraska: 10035, idaho: 10036, west_virginia: 10037, hawaii: 10038,
+    new_hampshire: 10039, maine: 10040, montana: 10041, rhode_island: 10042,
+    delaware: 10043, south_dakota: 10044, north_dakota: 10045,
+    alaska: 10046, vermont: 10047, wyoming: 10048, district_of_columbia: 10049,
+    virginia: 10050, new_jersey: 10051,
+  };
+
+  let resolvedProxy = null;
+  if (proxyConfig && proxyConfig.host) {
+    // Already resolved (host/port/username/password) — use as-is
+    resolvedProxy = proxyConfig;
+  } else if (proxyConfig && proxyConfig.state) {
+    // Frontend sent { state, sessionType } — build Decodo credentials
+    const proxyHost = process.env.DECODO_PROXY_HOST;
+    const proxyUser = process.env.DECODO_PROXY_USER;
+    const proxyPass = process.env.DECODO_PROXY_PASS;
+    if (proxyHost && proxyUser && proxyPass) {
+      const stateKey = (proxyConfig.state || 'california').toLowerCase().replace(/ /g, '_');
+      const port = PROXY_STATE_PORTS[stateKey] || 10001;
+      resolvedProxy = { host: proxyHost, port, username: proxyUser, password: proxyPass };
+      log.log(`[PROXY] Built Decodo creds from state "${proxyConfig.state}" → port ${port}`);
+    } else {
+      log.log(`[PROXY] WARNING — proxyConfig has state "${proxyConfig.state}" but DECODO env vars missing! host=${!!proxyHost} user=${!!proxyUser} pass=${!!proxyPass}`);
+    }
+  }
 
   const launchArgs = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
     '--window-size=1280,900', '--disable-blink-features=AutomationControlled',
     '--disable-features=site-per-process', // Prevent cross-process iframes from creating context issues
   ];
-  if (proxyConfig && proxyConfig.host) {
-    launchArgs.push(`--proxy-server=${proxyConfig.host}:${proxyConfig.port}`);
-    log.log(`[PROXY] Active — ${proxyConfig.host}:${proxyConfig.port} (user: ${proxyConfig.username ? 'yes' : 'no'})`);
+  if (resolvedProxy && resolvedProxy.host) {
+    launchArgs.push(`--proxy-server=${resolvedProxy.host}:${resolvedProxy.port}`);
+    log.log(`[PROXY] Active — ${resolvedProxy.host}:${resolvedProxy.port} (user: ${resolvedProxy.username ? 'yes' : 'no'})`);
   } else {
     log.log('[PROXY] WARNING — No proxy configured! CL will geolocate to Railway datacenter IP. Posts may redirect to wrong region.');
   }
@@ -392,8 +431,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    if (proxyConfig && proxyConfig.username) {
-      await page.authenticate({ username: proxyConfig.username, password: proxyConfig.password });
+    if (resolvedProxy && resolvedProxy.username) {
+      await page.authenticate({ username: resolvedProxy.username, password: resolvedProxy.password });
+      log.log(`[PROXY] Authenticated with Decodo user credentials`);
     }
     page.setDefaultTimeout(30000);
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
