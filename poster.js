@@ -484,11 +484,18 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
         const ipInfo = await page.evaluate(() => {
           try { return JSON.parse(document.body.innerText); } catch { return { raw: document.body.innerText.substring(0, 500) }; }
         });
-        log.log(`[PROXY] IP check result: ${JSON.stringify(ipInfo).substring(0, 300)}`);
-        if (ipInfo.country && !ipInfo.country.toLowerCase().includes('us') && ipInfo.country_code !== 'US') {
-          log.log(`[PROXY] WARNING: IP is in ${ipInfo.country} (${ipInfo.country_code}), NOT in US! Proxy geo-targeting may not be working.`);
+        log.log(`[PROXY] IP check result: ${JSON.stringify(ipInfo).substring(0, 500)}`);
+        // Decodo's ip.decodo.com/json returns nested structure: { isp: {...}, city: { name, code }, country: { name, code }, ip }
+        const ipCity = (ipInfo.city && ipInfo.city.name) || ipInfo.city || 'unknown';
+        const ipState = (ipInfo.city && ipInfo.city.code) || ipInfo.region || ipInfo.state || 'unknown';
+        const ipCountry = (ipInfo.country && ipInfo.country.name) || ipInfo.country || 'unknown';
+        const ipCountryCode = (ipInfo.country && ipInfo.country.code) || ipInfo.country_code || '';
+        const ipISP = (ipInfo.isp && ipInfo.isp.isp) || 'unknown';
+        log.log(`[PROXY] GEO: ${ipCity}, ${ipState}, ${ipCountry} (${ipCountryCode}) via ${ipISP}`);
+        if (ipCountryCode && ipCountryCode !== 'US') {
+          log.log(`[PROXY] WARNING: IP is in ${ipCountry} (${ipCountryCode}), NOT in US! Proxy geo-targeting may not be working.`);
         } else {
-          log.log(`[PROXY] Confirmed: IP located in ${ipInfo.city || 'unknown city'}, ${ipInfo.region || ipInfo.state || 'unknown state'}, ${ipInfo.country || 'unknown country'}`);
+          log.log(`[PROXY] Confirmed: US residential IP in ${ipCity}, ${ipState}`);
         }
       } catch (ipErr) {
         log.log(`[PROXY] IP verification failed (non-fatal): ${ipErr.message.substring(0, 100)}`);
@@ -569,67 +576,146 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     }
 
     // =========================================================
-    // Step 3: Handle subarea selection if it appears
-    // (e.g. LA has: westside-southbay, sfv, centralLA, longbeach, etc.)
+    // Step 3: Handle area/subarea selection if it appears
+    // CL can show TWO different area pages:
+    //   a) Top-level area dropdown (<select name="n">) — "which city/area would you like to post to?"
+    //      This appears when CL can't determine the region from the URL/IP.
+    //   b) Subarea radio buttons — "choose nearest area" within a city (e.g. LA subareas)
     // =========================================================
     if (stage === 'subarea') {
-      log.log('On subarea selection page');
+      log.log('On area/subarea selection page');
       await updateJobStatus(jobId, 'processing', 'selecting_area');
 
-      // Log available subareas for debugging
-      const availableSubareas = await safeEvaluate(page, () => {
-        const radios = document.querySelectorAll('form.picker input[type="radio"]');
-        return Array.from(radios).map(r => {
-          const label = r.closest('label') || document.querySelector(`label[for="${r.id}"]`);
-          return {
-            value: r.value || '',
-            id: r.id || '',
-            name: r.name || '',
-            labelText: label ? label.textContent.trim() : ''
-          };
-        });
-      }, undefined, log).catch(() => []);
-      log.log(`Available subareas: ${JSON.stringify(availableSubareas)}`);
-      log.log(`Requested subarea from frontend: ${subarea || '(none — will pick first)'}`);
+      // Check if this is a top-level AREA dropdown page (select name="n")
+      const hasAreaDropdown = await safeEvaluate(page, () => {
+        return !!document.querySelector('select[name="n"]');
+      }, undefined, log).catch(() => false);
 
-      // Select the matching subarea if one was requested from the frontend,
-      // otherwise fall back to the first radio button.
-      const selectedSub = await safeEvaluate(page, (requestedSubarea) => {
-        const radios = Array.from(document.querySelectorAll('form.picker input[type="radio"]'));
-        let target = null;
+      if (hasAreaDropdown) {
+        // ── Top-level area dropdown: select the correct CL city ──
+        log.log('[AREA] Found top-level area dropdown — selecting target city');
+        const targetName = (cityKey || '').toLowerCase();
 
-        if (requestedSubarea) {
-          const req = requestedSubarea.toLowerCase();
-          // Strategy 1: Match by radio value (most reliable — CL uses subarea codes as values)
-          target = radios.find(r => (r.value || '').toLowerCase() === req);
-          // Strategy 2: Match by radio id containing the code
-          if (!target) target = radios.find(r => (r.id || '').toLowerCase().includes(req));
-          // Strategy 3: Match by label text containing the code
-          if (!target) {
-            target = radios.find(r => {
-              const label = r.closest('label') || document.querySelector(`label[for="${r.id}"]`);
-              return label && label.textContent.toLowerCase().includes(req);
-            });
-          }
+        // Map CL subdomain names to how they appear in the dropdown
+        const CITY_DROPDOWN_NAMES = {
+          losangeles: 'los angeles', sfbay: 'SF bay area', sandiego: 'san diego',
+          orangecounty: 'orange county', inlandempire: 'inland empire',
+          newyork: 'new york city', chicago: 'chicago', houston: 'houston',
+          dallas: 'dallas / fort worth', miami: 'south florida',
+          atlanta: 'atlanta', seattle: 'seattle-tacoma', boston: 'boston',
+          phoenix: 'phoenix', denver: 'denver', portland: 'portland',
+          detroit: 'detroit metro', minneapolis: 'minneapolis / st paul',
+          philadelphia: 'philadelphia', washingtondc: 'washington, DC',
+          sacramento: 'sacramento', austin: 'austin', nashville: 'nashville',
+          tampa: 'tampa bay area', orlando: 'orlando', charlotte: 'charlotte',
+          columbus: 'columbus', cleveland: 'cleveland', pittsburgh: 'pittsburgh',
+          indianapolis: 'indianapolis', sanantonio: 'san antonio',
+          stlouis: 'st louis', kansascity: 'kansas city', raleigh: 'raleigh',
+          jacksonville: 'jacksonville', lasvegas: 'las vegas',
+          tucson: 'tucson', honolulu: 'honolulu', reno: 'reno / tahoe',
+          saltlakecity: 'salt lake city', albuquerque: 'albuquerque',
+          memphis: 'memphis', richmond: 'richmond', norfolk: 'norfolk',
+          fresno: 'fresno / madera', bakersfield: 'bakersfield',
+          stockton: 'stockton', modesto: 'modesto', santabarbara: 'santa barbara',
+          ventura: 'ventura county', santacruz: 'santa cruz',
+        };
+
+        const dropdownTarget = CITY_DROPDOWN_NAMES[targetName] || targetName.replace(/county|empire|bay/gi, '').trim();
+        log.log(`[AREA] Looking for "${dropdownTarget}" in area dropdown`);
+
+        // First, find the matching option value (don't set it yet — use page.select later)
+        const matchResult = await safeEvaluate(page, (searchName) => {
+          const select = document.querySelector('select[name="n"]');
+          if (!select) return { found: false, error: 'no select element' };
+          const options = Array.from(select.options);
+          const search = searchName.toLowerCase();
+
+          let match = options.find(o => o.textContent.trim().toLowerCase() === search);
+          if (!match) match = options.find(o => o.textContent.trim().toLowerCase().startsWith(search));
+          if (!match) match = options.find(o => o.textContent.trim().toLowerCase().includes(search));
+
+          if (match) return { found: true, value: match.value, text: match.textContent.trim() };
+          return { found: false, options: options.slice(0, 10).map(o => o.textContent.trim()) };
+        }, dropdownTarget, log);
+        log.log(`[AREA] Dropdown match result: ${JSON.stringify(matchResult)}`);
+
+        if (matchResult && matchResult.found) {
+          // Use Puppeteer's page.select() — properly fires all DOM events CL expects
+          await page.select('select[name="n"]', matchResult.value);
+          await delay(300 + Math.random() * 200);
+          log.log(`[AREA] Selected: "${matchResult.text}" (value=${matchResult.value}) via page.select()`);
+        } else {
+          log.log(`[AREA] WARNING: Could not find "${dropdownTarget}" in dropdown! Available: ${JSON.stringify(matchResult?.options || [])}`);
         }
 
-        // Fallback: first radio
-        if (!target && radios.length > 0) target = radios[0];
-
-        if (target) {
-          target.checked = true;
-          return target.value || target.id || 'first-radio';
+        // Submit the form
+        const btn = await findContinueButton(page);
+        if (btn) {
+          await clickAndNavigate(page, () => btn.click(), 'area dropdown submit', 20000, log);
         }
-        return null;
-      }, subarea || null, log);
-      log.log(`Selected subarea: ${selectedSub}`);
+        stage = await detectStage(page, log);
+        log.log('[AREA] Stage after area selection:', stage);
 
-      const btn = await findContinueButton(page);
-      if (btn) {
-        await clickAndNavigate(page, () => btn.click(), 'subarea continue', 15000, log);
+        // After selecting the top-level area, CL may show subareas next
+        // Fall through to the radio button handler below
       }
-      stage = await detectStage(page, log);
-      log.log('Stage after subarea:', stage);
+
+      // ── Subarea radio buttons (within a city) ──
+      if (stage === 'subarea') {
+        // Check for radio buttons (not dropdown — we already handled that above)
+        const hasRadios = await safeEvaluate(page, () => {
+          return document.querySelectorAll('form.picker input[type="radio"]').length;
+        }, undefined, log).catch(() => 0);
+
+        if (hasRadios > 0) {
+          log.log(`On subarea radio selection page (${hasRadios} options)`);
+          const availableSubareas = await safeEvaluate(page, () => {
+            const radios = document.querySelectorAll('form.picker input[type="radio"]');
+            return Array.from(radios).map(r => {
+              const label = r.closest('label') || document.querySelector(`label[for="${r.id}"]`);
+              return { value: r.value || '', id: r.id || '', labelText: label ? label.textContent.trim() : '' };
+            });
+          }, undefined, log).catch(() => []);
+          log.log(`Available subareas: ${JSON.stringify(availableSubareas)}`);
+          log.log(`Requested subarea from frontend: ${subarea || '(none — will pick first)'}`);
+
+          const selectedSub = await safeEvaluate(page, (requestedSubarea) => {
+            const radios = Array.from(document.querySelectorAll('form.picker input[type="radio"]'));
+            let target = null;
+            if (requestedSubarea) {
+              const req = requestedSubarea.toLowerCase();
+              target = radios.find(r => (r.value || '').toLowerCase() === req);
+              if (!target) target = radios.find(r => (r.id || '').toLowerCase().includes(req));
+              if (!target) {
+                target = radios.find(r => {
+                  const label = r.closest('label') || document.querySelector(`label[for="${r.id}"]`);
+                  return label && label.textContent.toLowerCase().includes(req);
+                });
+              }
+            }
+            if (!target && radios.length > 0) target = radios[0];
+            if (target) { target.checked = true; return target.value || target.id || 'first-radio'; }
+            return null;
+          }, subarea || null, log);
+          log.log(`Selected subarea: ${selectedSub}`);
+
+          const btn2 = await findContinueButton(page);
+          if (btn2) {
+            await clickAndNavigate(page, () => btn2.click(), 'subarea continue', 15000, log);
+          }
+          stage = await detectStage(page, log);
+          log.log('Stage after subarea:', stage);
+        } else {
+          // No radios and no dropdown (or dropdown was already handled) — just continue
+          log.log('[AREA] No radio buttons found, clicking continue...');
+          const btn = await findContinueButton(page);
+          if (btn) {
+            await clickAndNavigate(page, () => btn.click(), 'area continue (no selection available)', 15000, log);
+          }
+          stage = await detectStage(page, log);
+          log.log('Stage after area continue:', stage);
+        }
+      }
     }
 
     // =========================================================
@@ -1273,41 +1359,64 @@ async function fillField(page, selector, value, fieldName, log = defaultLogger) 
   try {
     const el = await page.$(selector);
     if (el) {
+      // Strip emojis/special unicode — CL only accepts plain text in form fields.
+      const cleanValue = value.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}\u{2764}\u{FE0F}\u{20E3}\u{2B50}\u{2705}\u{274C}\u{2728}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}]/gu, '').replace(/  +/g, ' ');
+
       // Step 1: Scroll into view
       await el.evaluate(e => e.scrollIntoView({ block: 'center', behavior: 'instant' }));
+      await delay(200 + Math.random() * 300);
+
+      // Step 2: Get bounding box and click at a random point within the field
+      // Using mouse.click with coordinates is more human-like than el.click()
+      const box = await el.boundingBox();
+      if (box) {
+        const clickX = box.x + 5 + Math.random() * Math.min(box.width - 10, 100);
+        const clickY = box.y + box.height / 2 + (Math.random() - 0.5) * (box.height * 0.4);
+        await page.mouse.click(clickX, clickY);
+      } else {
+        await el.click();
+      }
       await delay(150 + Math.random() * 200);
 
-      // Step 2: CLICK the field with the mouse (not JS focus — CL checks for mouse events)
-      await el.click();
-      await delay(100 + Math.random() * 150);
-
-      // Step 3: Select all existing text and delete it
-      await page.keyboard.down('Control');
-      await page.keyboard.press('a');
-      await page.keyboard.up('Control');
+      // Step 3: Triple-click to select all text (human way, not Ctrl+A)
+      if (box) {
+        const clickX = box.x + 5 + Math.random() * Math.min(box.width - 10, 100);
+        const clickY = box.y + box.height / 2;
+        await page.mouse.click(clickX, clickY, { clickCount: 3 });
+      } else {
+        await el.click({ clickCount: 3 });
+      }
+      await delay(80 + Math.random() * 100);
       await page.keyboard.press('Backspace');
       await delay(80 + Math.random() * 100);
 
-      // Step 4: Strip emojis/special unicode — CL only accepts plain text in form fields.
-      // Emojis trigger execCommand fallback which CL detects as "autofilled".
-      const cleanValue = value.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}\u{2764}\u{FE0F}\u{20E3}\u{2B50}\u{2705}\u{274C}\u{2728}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}]/gu, '').replace(/  +/g, ' ');
+      // Step 4: Type with Puppeteer's type() — fires real keydown/keypress/input/keyup per char
+      // Use a human-like delay between keystrokes (20-55ms with occasional pauses)
+      const baseDelay = 20 + Math.floor(Math.random() * 15);
+      for (let i = 0; i < cleanValue.length; i++) {
+        await page.keyboard.type(cleanValue[i]);
+        // Variable delay: occasional longer pauses (like a human thinking)
+        let charDelay = baseDelay + Math.floor(Math.random() * 20);
+        if (Math.random() < 0.05) charDelay += 80 + Math.random() * 120; // 5% chance of longer pause
+        if (cleanValue[i] === ' ') charDelay += 10 + Math.random() * 30; // slightly longer on spaces
+        await delay(charDelay);
+      }
 
-      // Step 5: Type with Puppeteer's type() — fires real keydown/keypress/input/keyup per char
-      // Use a human-like delay between keystrokes (15-40ms)
-      await el.type(cleanValue, { delay: 15 + Math.floor(Math.random() * 25) });
+      // Step 5: Small pause then blur (click somewhere else or tab)
+      await delay(200 + Math.random() * 300);
+      // Click outside the field to blur (more natural than Tab)
+      if (box) {
+        await page.mouse.click(box.x + box.width + 20, box.y + box.height + 20);
+      }
+      await delay(150);
 
-      // Step 6: Blur the field (simulate tabbing away — triggers change events)
-      await delay(100 + Math.random() * 150);
-      await page.keyboard.press('Tab');
-      await delay(100);
-
-      // Step 7: Verify the value was set
+      // Step 6: Verify the value was set
       const actualValue = await el.evaluate(e => e.value || e.textContent || '');
       if (actualValue.length === 0 && cleanValue.length > 0) {
-        log.log(`WARNING: ${fieldName} appears empty after fill, retrying...`);
+        log.log(`WARNING: ${fieldName} appears empty after fill, retrying with type()...`);
         await el.click();
         await delay(200);
-        await el.type(cleanValue, { delay: 20 });
+        await el.type(cleanValue, { delay: 25 + Math.floor(Math.random() * 15) });
       }
 
       log.log(`Filled ${fieldName}: "${cleanValue.substring(0, 50)}${cleanValue.length > 50 ? '...' : ''}"`);
@@ -1323,7 +1432,7 @@ async function fillField(page, selector, value, fieldName, log = defaultLogger) 
         await el.click();
         await delay(200);
         const cleanValue = value.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}]/gu, '');
-        await el.type(cleanValue, { delay: 20 });
+        await el.type(cleanValue, { delay: 25 });
         log.log(`Filled ${fieldName} via fallback type()`);
       }
     } catch (e2) {
