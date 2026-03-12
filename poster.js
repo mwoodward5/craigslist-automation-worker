@@ -268,23 +268,39 @@ async function downloadImage(url, destPath) {
 }
 
 // Detect which wizard stage we're on — uses safeEvaluate for resilience
+// IMPORTANT: Check longer/more-specific names BEFORE substrings.
+// e.g. 'editimage' must be checked before 'edit' since 'editimage'.includes('edit') === true
 async function detectStage(page, log = defaultLogger) {
   return await safeEvaluate(page, () => {
+    // Most reliable: check the URL's ?s= parameter
+    const url = window.location.href;
+    const sMatch = url.match(/[?&]s=([a-zA-Z]+)/);
+    if (sMatch) {
+      const sParam = sMatch[1].toLowerCase();
+      const knownStages = ['copyfromanother', 'subarea', 'hood', 'type', 'cat', 'editimage', 'edit', 'geoverify', 'preview', 'finalize'];
+      for (const s of knownStages) {
+        if (sParam === s) return s;
+      }
+    }
+
+    // Fallback: check body class — LONGER names first to avoid substring matches
     const body = document.body;
     const classes = body.className || '';
-    const stages = ['copyfromanother', 'subarea', 'hood', 'type', 'cat', 'edit', 'geoverify', 'editimage', 'preview', 'finalize'];
+    const stages = ['copyfromanother', 'editimage', 'subarea', 'hood', 'type', 'cat', 'geoverify', 'preview', 'finalize', 'edit'];
     for (const s of stages) {
       if (classes.includes(s)) return s;
     }
+
+    // Fallback: check page title
     const title = document.title.toLowerCase();
     if (title.includes('choose type')) return 'type';
     if (title.includes('choose category')) return 'cat';
     if (title.includes('choose nearest area') || title.includes('choose area')) return 'subarea';
     if (title.includes('choose neighborhood')) return 'hood';
     if (title.includes('copy from')) return 'copyfromanother';
+    if (title.includes('choose images') || title.includes('add images')) return 'editimage';
     if (title.includes('edit posting') || title.includes('posting details')) return 'edit';
-    if (title.includes('add images')) return 'editimage';
-    if (title.includes('verify')) return 'geoverify';
+    if (title.includes('verify') || title.includes('add map')) return 'geoverify';
     if (title.includes('preview')) return 'preview';
     return 'unknown';
   }, undefined, log);
