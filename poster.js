@@ -555,6 +555,58 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       // Brief pause after zip — CL sometimes does AJAX validation that modifies the DOM
       await delay(1000);
 
+      // ── Reply email (REQUIRED by CL) ──
+      // CL requires a reply email address on the edit form.
+      // Use the credentials email, adData email, or fallback.
+      const replyEmail = (credentials && credentials.email) || email || adData.email || process.env.CL_EMAIL || '';
+      if (replyEmail) {
+        // Try multiple selectors — CL uses different field names depending on category
+        const emailSelectors = [
+          'input[name="FromEMail"]',
+          'input[name="Reply.To.eMail"]',
+          'input[name="reply_email"]',
+          'input#FromEMail',
+        ];
+        let emailFilled = false;
+        for (const sel of emailSelectors) {
+          const emailEl = await page.$(sel);
+          if (emailEl) {
+            await fillField(page, sel, replyEmail, 'reply email', log);
+            emailFilled = true;
+            break;
+          }
+        }
+        // Also fill confirm email if present
+        const confirmSelectors = [
+          'input[name="ConfirmEMail"]',
+          'input#ConfirmEMail',
+          'input[name="confirm_email"]',
+        ];
+        for (const sel of confirmSelectors) {
+          const confirmEl = await page.$(sel);
+          if (confirmEl) {
+            await fillField(page, sel, replyEmail, 'confirm email', log);
+            break;
+          }
+        }
+        if (!emailFilled) {
+          log.log('Warning: No reply email field found on form');
+        }
+      } else {
+        log.log('Warning: No reply email available to fill');
+      }
+
+      // ── Reply options / Privacy (check "CL mail relay" if available) ──
+      try {
+        const privacyRadio = await page.$('input[name="Privacy"][value="C"]');
+        if (privacyRadio) {
+          await privacyRadio.evaluate(el => { el.checked = true; });
+          log.log('Set privacy to CL mail relay (C)');
+        }
+      } catch (privErr) {
+        log.log('Privacy radio not found or not settable (non-fatal)');
+      }
+
       // Optional fields — all wrapped in try/catch so failures don't kill the posting
       try {
         if (condition) {
@@ -591,6 +643,36 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       }
       stage = await detectStage(page, log);
       log.log('Stage after form submit:', stage);
+
+      // If still on edit page, CL likely has validation errors — capture them
+      if (stage === 'edit') {
+        const errors = await safeEvaluate(page, () => {
+          const errEls = document.querySelectorAll('.errtxt, .error, .field-error, span[style*="color: red"], .notice');
+          return Array.from(errEls).map(el => el.textContent.trim()).filter(t => t.length > 0);
+        }, undefined, log).catch(() => []);
+        if (errors && errors.length > 0) {
+          log.log('FORM VALIDATION ERRORS:', JSON.stringify(errors));
+          throw new Error(`CL form validation failed: ${errors.join('; ').substring(0, 200)}`);
+        } else {
+          // No visible errors but still on edit — try submitting again after a delay
+          log.log('Still on edit page with no visible errors, retrying submit...');
+          await delay(2000);
+          const retryBtn = await findContinueButton(page);
+          if (retryBtn) {
+            await clickAndNavigate(page, async () => {
+              try { await retryBtn.click(); } catch (e) { await retryBtn.evaluate(el => el.click()); }
+            }, 'form submit retry', 25000, log);
+            stage = await detectStage(page, log);
+            log.log('Stage after retry submit:', stage);
+          }
+          if (stage === 'edit') {
+            // Capture page screenshot and any error text for debugging
+            const pageText = await safeEvaluate(page, () => document.body.innerText.substring(0, 500), undefined, log).catch(() => '');
+            log.log('Page text on stuck edit:', pageText);
+            throw new Error('Form submission failed — page stayed on edit form after 2 attempts');
+          }
+        }
+      }
     }
 
     // =========================================================
