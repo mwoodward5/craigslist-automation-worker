@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --production
 
-COPY server.js poster.js ./
+COPY server.js poster.js zipLookup.js zip-to-cl.json ./
 
 EXPOSE 3000
 
