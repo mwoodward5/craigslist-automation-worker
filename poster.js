@@ -478,7 +478,14 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     if (stage === 'cat') {
       await updateJobStatus(jobId, 'processing', 'selecting_category');
       const catKeyword = (category || 'general').toLowerCase();
-      log.log(`Selecting category matching: "${catKeyword}"`);
+      log.log(`Selecting category matching: "${catKeyword}" (raw category from frontend: "${category}")`);
+
+      // Log all available categories on this page for debugging
+      const availableCats = await safeEvaluate(page, () => {
+        const labels = document.querySelectorAll('form.picker label, .selection-list label');
+        return Array.from(labels).map(l => l.textContent.trim()).filter(t => t.length > 0);
+      }, undefined, log).catch(() => []);
+      log.log(`Available categories on CL: ${JSON.stringify(availableCats)}`);
 
       let found = await selectRadioByLabelText(page, catKeyword, 'category', log);
       if (!found) {
@@ -491,9 +498,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
           'cell-phones': 'cell phones',
           'general': 'general for sale',
           'for-sale-by-owner': 'general for sale',
-          'bicycles': 'bicycles',
-          'bikes': 'bicycles',
-          'bicycle': 'bicycles',
+          'bicycles': 'bicycles - by owner',
+          'bikes': 'bicycles - by owner',
+          'bicycle': 'bicycles - by owner',
           'sporting': 'sporting goods',
           'tools': 'tools',
           'appliances': 'appliances',
@@ -574,7 +581,10 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       // ── Reply email (REQUIRED by CL) ──
       // CL requires a reply email address on the edit form.
       // Use the credentials email, adData email, or fallback.
-      const replyEmail = (credentials && credentials.email) || email || adData.email || process.env.CL_EMAIL || '';
+      // Normalize email to lowercase — CL rejects uppercase email addresses
+      const rawEmail = (credentials && credentials.email) || email || adData.email || process.env.CL_EMAIL || '';
+      const replyEmail = rawEmail.toLowerCase().trim();
+      log.log(`Reply email: "${replyEmail}" (raw: "${rawEmail}")`);
       if (replyEmail) {
         // Try multiple selectors — CL uses different field names depending on category
         const emailSelectors = [
@@ -663,8 +673,18 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       // If still on edit page, CL likely has validation errors — capture them
       if (stage === 'edit') {
         const errors = await safeEvaluate(page, () => {
-          const errEls = document.querySelectorAll('.errtxt, .error, .field-error, span[style*="color: red"], .notice');
-          return Array.from(errEls).map(el => el.textContent.trim()).filter(t => t.length > 0);
+          // CL uses various elements for errors: red text, .errtxt, .notice, 
+          // and also plain text blocks at top like "Some required information is missing"
+          const errEls = document.querySelectorAll('.errtxt, .error, .field-error, span[style*="color: red"], span[style*="color:red"], .notice, .errormsg, .req, p[style*="color: red"], p[style*="color:red"]');
+          const errs = Array.from(errEls).map(el => el.textContent.trim()).filter(t => t.length > 0);
+          // Also check for CL's "required information is missing" banner
+          const bodyText = document.body.innerText.substring(0, 500);
+          if (bodyText.includes('required information is missing') || bodyText.includes('doesn\'t look right') || bodyText.includes('correct the fields')) {
+            // Extract the error lines
+            const lines = bodyText.split('\n').filter(l => l.includes('doesn\'t look right') || l.includes('required') || l.includes('missing') || l.includes('incorrect'));
+            errs.push(...lines);
+          }
+          return errs;
         }, undefined, log).catch(() => []);
         if (errors && errors.length > 0) {
           log.log('FORM VALIDATION ERRORS:', JSON.stringify(errors));
@@ -987,17 +1007,25 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   }
 }
 
-// Helper to safely fill a form field (clear + type)
-// Uses evaluate to clear the field instead of .click() which can throw
-// "Node is either not clickable or not an Element" on CL's dynamic forms.
+// Helper to safely fill a form field
+// Uses evaluate to set value directly — avoids issues with:
+//   - el.type() breaking emoji/unicode sequences
+//   - el.type() being slow on long descriptions
+//   - CL's JS not recognizing programmatic .value changes without events
 async function fillField(page, selector, value, fieldName, log = defaultLogger) {
   if (!value) return;
   try {
     const el = await page.$(selector);
     if (el) {
-      // Clear field safely via JS (no Puppeteer .click() which can fail on detached/obscured nodes)
-      await el.evaluate(e => { e.focus(); e.value = ''; });
-      await el.type(value);
+      // Set value via JS and dispatch events so CL's validation picks it up
+      await el.evaluate((e, val) => {
+        e.focus();
+        e.value = val;
+        // Dispatch events CL listens for
+        e.dispatchEvent(new Event('input', { bubbles: true }));
+        e.dispatchEvent(new Event('change', { bubbles: true }));
+        e.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, value);
       log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
     } else {
       log.log(`Field not found: ${fieldName} (${selector})`);
