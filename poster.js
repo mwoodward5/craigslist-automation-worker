@@ -424,15 +424,26 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
     // =========================================================
     // Step 3: Handle subarea selection if it appears
+    // (e.g. LA has: westside-southbay, sfv, centralLA, longbeach, etc.)
     // =========================================================
     if (stage === 'subarea') {
       log.log('On subarea selection page');
       await updateJobStatus(jobId, 'processing', 'selecting_area');
-      const firstRadio = await page.$('form.picker input[type="radio"]');
-      if (firstRadio) {
-        await firstRadio.click();
-        log.log('Selected first subarea');
-      }
+
+      // Log available subareas for debugging
+      const subareas = await safeEvaluate(page, () => {
+        const labels = document.querySelectorAll('form.picker label, .selection-list label');
+        return Array.from(labels).map(l => l.textContent.trim()).filter(t => t.length > 0);
+      }, undefined, log).catch(() => []);
+      log.log(`Available subareas: ${JSON.stringify(subareas)}`);
+
+      // Select the first subarea via .checked (NOT .click() which auto-submits on CL)
+      await safeEvaluate(page, () => {
+        const radio = document.querySelector('form.picker input[type="radio"]');
+        if (radio) radio.checked = true;
+      }, undefined, log);
+      log.log('Selected first subarea');
+
       const btn = await findContinueButton(page);
       if (btn) {
         await clickAndNavigate(page, () => btn.click(), 'subarea continue', 15000, log);
@@ -446,10 +457,20 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     // =========================================================
     if (stage === 'hood') {
       log.log('On neighborhood selection page');
-      const firstRadio = await page.$('form.picker input[type="radio"]');
-      if (firstRadio) {
-        await firstRadio.click();
-      }
+
+      // Log available neighborhoods
+      const hoods = await safeEvaluate(page, () => {
+        const labels = document.querySelectorAll('form.picker label, .selection-list label');
+        return Array.from(labels).map(l => l.textContent.trim()).filter(t => t.length > 0);
+      }, undefined, log).catch(() => []);
+      log.log(`Available neighborhoods: ${JSON.stringify(hoods)}`);
+
+      // Select first hood via .checked (NOT .click())
+      await safeEvaluate(page, () => {
+        const radio = document.querySelector('form.picker input[type="radio"]');
+        if (radio) radio.checked = true;
+      }, undefined, log);
+
       const btn = await findContinueButton(page);
       if (btn) {
         await clickAndNavigate(page, () => btn.click(), 'hood continue', 15000, log);
@@ -1041,38 +1062,51 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 }
 
 // Helper to safely fill a form field
-// Strategy: click to focus, select-all to clear, then type the value.
-// For long text or text with emojis, use clipboard paste via evaluate.
-// CL detects direct .value= assignment as "autofilled" and rejects it,
-// so we must use Puppeteer's .type() or keyboard input for short fields.
+// Strategy: focus via JS, clear via select+delete, then type or insertText.
+// CL detects direct .value= assignment as "autofilled" and rejects the form,
+// so we must simulate real user input.
 async function fillField(page, selector, value, fieldName, log = defaultLogger) {
   if (!value) return;
   try {
     const el = await page.$(selector);
     if (el) {
-      // Click to focus (scroll into view first)
-      await el.evaluate(e => e.scrollIntoView({ block: 'center', behavior: 'instant' }));
-      await delay(100);
-      await el.click({ clickCount: 3 }); // triple-click to select all existing text
+      // Step 1: Scroll into view and focus via JS (more reliable than click)
+      await el.evaluate(e => {
+        e.scrollIntoView({ block: 'center', behavior: 'instant' });
+        e.focus();
+      });
+      await delay(200);
+
+      // Step 2: Select all existing text and delete it
+      // Use keyboard shortcuts which are more reliable than triple-click
+      await page.keyboard.down('Control');
+      await page.keyboard.press('a');
+      await page.keyboard.up('Control');
+      await page.keyboard.press('Backspace');
       await delay(100);
 
-      // For short fields (<100 chars) without complex unicode, use type() for natural input
-      // For long text or text with emojis, use a paste-like approach
-      const hasComplexChars = /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}\u{2328}\u{23CF}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}\u{2934}\u{2935}\u{25AA}-\u{25FE}\u{2B05}-\u{2B07}\u{2B1B}\u{2B1C}\u{2B50}\u{2B55}\u{3030}\u{303D}\u{3297}\u{3299}]/u.test(value);
+      // Step 3: Type or insert the value
+      // Check for emoji/complex unicode that type() can't handle
+      const hasEmoji = /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{200D}]/u.test(value);
 
-      if (value.length <= 100 && !hasComplexChars) {
-        // Natural typing for short plain-text fields (title, price, zip, email)
-        await el.type(value, { delay: 10 });
+      if (!hasEmoji) {
+        // Use Puppeteer type() for all plain text — most natural, CL accepts it
+        await el.type(value, { delay: 5 });
       } else {
-        // For descriptions with emojis or long text: 
-        // Use execCommand insertText which simulates paste and fires input events
+        // For text with emojis: use execCommand('insertText') which fires
+        // real input events (unlike .value=) and handles unicode correctly
         await el.evaluate((e, val) => {
           e.focus();
-          // Select all existing content
-          e.select ? e.select() : document.execCommand('selectAll');
-          // insertText fires input events like real typing, unlike .value=
           document.execCommand('insertText', false, val);
         }, value);
+      }
+
+      // Step 4: Verify the value was set
+      const actualValue = await el.evaluate(e => e.value || e.textContent || '');
+      if (actualValue.length === 0 && value.length > 0) {
+        log.log(`WARNING: ${fieldName} appears empty after fill, retrying with type()...`);
+        await el.evaluate(e => { e.focus(); e.value = ''; });
+        await el.type(value, { delay: 5 });
       }
 
       log.log(`Filled ${fieldName}: "${value.substring(0, 50)}${value.length > 50 ? '...' : ''}"`);
@@ -1080,7 +1114,18 @@ async function fillField(page, selector, value, fieldName, log = defaultLogger) 
       log.log(`Field not found: ${fieldName} (${selector})`);
     }
   } catch (err) {
-    log.log(`Warning: Could not fill ${fieldName}: ${err.message.substring(0, 80)}`);
+    log.log(`ERROR filling ${fieldName}: ${err.message.substring(0, 120)}`);
+    // Last resort fallback: try type() directly
+    try {
+      const el = await page.$(selector);
+      if (el) {
+        await el.evaluate(e => { e.focus(); e.value = ''; });
+        await el.type(value, { delay: 5 });
+        log.log(`Filled ${fieldName} via fallback type()`);
+      }
+    } catch (e2) {
+      log.log(`FALLBACK also failed for ${fieldName}: ${e2.message.substring(0, 80)}`);
+    }
   }
 }
 
