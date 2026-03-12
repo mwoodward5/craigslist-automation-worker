@@ -326,12 +326,15 @@ async function capturePageDebug(page, log) {
 
 async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, credentials, updateJobStatus, logger }) {
   const log = logger || defaultLogger;
-  const { title, price, description, category, condition, make, model, imageUrls, phoneNumber, email, sourceUrl } = adData;
+  const { title, price, description, category, categoryName, condition, make, model, imageUrls, phoneNumber, email, sourceUrl, subarea } = adData;
   const cityKey = targetCity || 'orangecounty';
   const cityInfo = CITY_MAP[cityKey] || CITY_MAP['orangecounty'];
   const baseUrl = cityInfo.base;
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
+
+  log.log(`[v2.13.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
+  log.log(`[v2.13.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
 
   const launchArgs = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
@@ -431,18 +434,52 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await updateJobStatus(jobId, 'processing', 'selecting_area');
 
       // Log available subareas for debugging
-      const subareas = await safeEvaluate(page, () => {
-        const labels = document.querySelectorAll('form.picker label, .selection-list label');
-        return Array.from(labels).map(l => l.textContent.trim()).filter(t => t.length > 0);
+      const availableSubareas = await safeEvaluate(page, () => {
+        const radios = document.querySelectorAll('form.picker input[type="radio"]');
+        return Array.from(radios).map(r => {
+          const label = r.closest('label') || document.querySelector(`label[for="${r.id}"]`);
+          return {
+            value: r.value || '',
+            id: r.id || '',
+            name: r.name || '',
+            labelText: label ? label.textContent.trim() : ''
+          };
+        });
       }, undefined, log).catch(() => []);
-      log.log(`Available subareas: ${JSON.stringify(subareas)}`);
+      log.log(`Available subareas: ${JSON.stringify(availableSubareas)}`);
+      log.log(`Requested subarea from frontend: ${subarea || '(none — will pick first)'}`);
 
-      // Select the first subarea via .checked (NOT .click() which auto-submits on CL)
-      await safeEvaluate(page, () => {
-        const radio = document.querySelector('form.picker input[type="radio"]');
-        if (radio) radio.checked = true;
-      }, undefined, log);
-      log.log('Selected first subarea');
+      // Select the matching subarea if one was requested from the frontend,
+      // otherwise fall back to the first radio button.
+      const selectedSub = await safeEvaluate(page, (requestedSubarea) => {
+        const radios = Array.from(document.querySelectorAll('form.picker input[type="radio"]'));
+        let target = null;
+
+        if (requestedSubarea) {
+          const req = requestedSubarea.toLowerCase();
+          // Strategy 1: Match by radio value (most reliable — CL uses subarea codes as values)
+          target = radios.find(r => (r.value || '').toLowerCase() === req);
+          // Strategy 2: Match by radio id containing the code
+          if (!target) target = radios.find(r => (r.id || '').toLowerCase().includes(req));
+          // Strategy 3: Match by label text containing the code
+          if (!target) {
+            target = radios.find(r => {
+              const label = r.closest('label') || document.querySelector(`label[for="${r.id}"]`);
+              return label && label.textContent.toLowerCase().includes(req);
+            });
+          }
+        }
+
+        // Fallback: first radio
+        if (!target && radios.length > 0) target = radios[0];
+
+        if (target) {
+          target.checked = true;
+          return target.value || target.id || 'first-radio';
+        }
+        return null;
+      }, subarea || null, log);
+      log.log(`Selected subarea: ${selectedSub}`);
 
       const btn = await findContinueButton(page);
       if (btn) {
