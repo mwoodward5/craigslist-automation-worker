@@ -3,14 +3,47 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { getClSubdomainForZip, validateZipForCity } = require('./zipLookup');
 
-const CITY_MAP = {
-  'orangecounty': { base: 'https://orangecounty.craigslist.org', code: 'orc', zip: '92694' },
-  'losangeles': { base: 'https://losangeles.craigslist.org', code: 'lac', zip: '90012' },
-  'sfbay': { base: 'https://sfbay.craigslist.org', code: 'sfc', zip: '94102' },
-  'sandiego': { base: 'https://sandiego.craigslist.org', code: 'sdo', zip: '92101' },
-  'inlandempire': { base: 'https://inlandempire.craigslist.org', code: 'iee', zip: '92501' },
+// Known CL area codes for the posting wizard URL (https://post.craigslist.org/c/{code}).
+// These are verified codes that may differ from the subdomain.
+// If a city isn't here, we fall back to the first 3 chars of the subdomain.
+const KNOWN_AREA_CODES = {
+  'orangecounty': 'orc', 'losangeles': 'lac', 'sfbay': 'sfc',
+  'sandiego': 'sdo', 'inlandempire': 'iee', 'newyork': 'nyc',
+  'chicago': 'chi', 'boston': 'bos', 'seattle': 'sea',
+  'portland': 'pdx', 'dallas': 'dal', 'houston': 'hou',
+  'atlanta': 'atl', 'detroit': 'det', 'denver': 'den',
+  'phoenix': 'phx', 'minneapolis': 'min', 'miami': 'mia',
+  'tampa': 'tpa', 'philadelphia': 'phi', 'washingtondc': 'wdc',
+  'sacramento': 'sac', 'sandiego': 'sdo', 'austin': 'aus',
+  'nashville': 'nas', 'stlouis': 'stl', 'kansascity': 'kan',
+  'orlando': 'orl', 'jacksonville': 'jax', 'raleigh': 'ral',
+  'charlotte': 'cha', 'columbus': 'col', 'cleveland': 'cle',
+  'pittsburgh': 'pit', 'indianapolis': 'ind', 'sanantonio': 'sat',
 };
+
+// Build default zips per subdomain from ArcGIS data
+const { ZIP_TO_CL } = require('./zipLookup');
+const _subdomainZips = {};
+for (const [zip, sub] of Object.entries(ZIP_TO_CL)) {
+  if (!_subdomainZips[sub]) _subdomainZips[sub] = [];
+  _subdomainZips[sub].push(zip);
+}
+
+/**
+ * Get city info for any CL subdomain. Uses ArcGIS data for zip defaults.
+ * Works for ALL ~400 CL cities, not just a hardcoded list.
+ */
+function getCityInfo(subdomain) {
+  const zips = _subdomainZips[subdomain];
+  const defaultZip = zips ? zips[Math.floor(zips.length / 2)] : '92694';
+  return {
+    base: `https://${subdomain}.craigslist.org`,
+    code: KNOWN_AREA_CODES[subdomain] || subdomain.substring(0, 3),
+    zip: defaultZip
+  };
+}
 
 // Map category to the radio button label text on CL wizard "choose type" page.
 // Supports both human-readable names AND CL path codes (fso, bfs, cto, etc.)
@@ -328,13 +361,13 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const log = logger || defaultLogger;
   const { title, price, description, category, categoryName, condition, make, model, imageUrls, phoneNumber, email, sourceUrl, subarea } = adData;
   const cityKey = targetCity || 'orangecounty';
-  const cityInfo = CITY_MAP[cityKey] || CITY_MAP['orangecounty'];
+  const cityInfo = getCityInfo(cityKey);
   const baseUrl = cityInfo.base;
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
 
-  log.log(`[v2.13.1] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
-  log.log(`[v2.13.1] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
+  log.log(`[v2.14.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
+  log.log(`[v2.14.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
 
   const launchArgs = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
@@ -644,13 +677,30 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await fillField(page, 'input[name="PostingTitle"]', title || 'Item for Sale', 'title', log);
       await fillField(page, 'input[name="price"]', String(price || ''), 'price', log);
       await fillField(page, 'textarea[name="PostingBody"]', description || '', 'description', log);
-      // Use the zip code from the frontend payload (which may come from the selected subarea).
-      // Only fall back to the city's default zip if the frontend didn't send one.
-      // The frontend now sends subarea-specific zips (e.g. 90802 for Long Beach in LA).
+      // Smart zip selection using ArcGIS CL zip lookup data (33K zip-to-region mappings).
+      // Priority: frontend zip (from subarea) > validated ad zip > city default zip.
+      // If the zip doesn't belong to the target CL city, auto-correct to the city default.
       const frontendZip = adData.zipCode || adData.zip;
-      const cityZip = frontendZip || cityInfo.zip || '92694';
-      log.log(`Using zip: ${cityZip} (frontend=${frontendZip || 'none'}, cityDefault=${cityInfo.zip}, subarea=${subarea || 'none'})`);
-      await fillField(page, 'input[name="postal"]', cityZip, 'zip', log);
+      let finalZip = cityInfo.zip || '92694'; // safe default
+
+      if (frontendZip) {
+        const validation = validateZipForCity(frontendZip, cityKey);
+        if (validation.valid) {
+          finalZip = frontendZip;
+          log.log(`[ZIP] Using frontend zip ${frontendZip} — validated for ${cityKey}`);
+        } else if (validation.actualCity) {
+          log.log(`[ZIP] Frontend zip ${frontendZip} belongs to "${validation.actualCity}" not "${cityKey}" — using city default ${cityInfo.zip} instead`);
+          finalZip = cityInfo.zip;
+        } else {
+          // Unknown zip in ArcGIS data — trust the frontend
+          finalZip = frontendZip;
+          log.log(`[ZIP] Frontend zip ${frontendZip} not in ArcGIS lookup — using as-is`);
+        }
+      } else {
+        log.log(`[ZIP] No frontend zip — using city default: ${finalZip}`);
+      }
+
+      await fillField(page, 'input[name="postal"]', finalZip, 'zip', log);
 
       // Brief pause after zip — CL sometimes does AJAX validation that modifies the DOM
       await delay(1000);
