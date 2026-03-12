@@ -366,9 +366,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
 
-  log.log(`[v2.15.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
-  log.log(`[v2.15.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
-  log.log(`[v2.15.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
+  log.log(`[v2.16.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
+  log.log(`[v2.16.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
+  log.log(`[v2.16.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
 
   // ── Resolve proxy credentials ──
   // Frontend sends { state: 'california', sessionType: 'sticky' }.
@@ -765,8 +765,10 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     // =========================================================
     if (stage === 'cat') {
       await updateJobStatus(jobId, 'processing', 'selecting_category');
-      const catKeyword = (category || 'general').toLowerCase();
-      log.log(`Selecting category matching: "${catKeyword}" (raw category from frontend: "${category}")`);
+      // Category selection: prefer categoryName (specific subcategory like "bicycles")
+      // over category (broad type code like "fso"). The frontend should send both.
+      const catKeyword = (categoryName || category || 'general').toLowerCase();
+      log.log(`Selecting category: keyword="${catKeyword}" (categoryName=${categoryName || 'n/a'}, category=${category})`);
 
       // Log all available categories on this page for debugging
       const availableCats = await safeEvaluate(page, () => {
@@ -775,68 +777,87 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       }, undefined, log).catch(() => []);
       log.log(`Available categories on CL: ${JSON.stringify(availableCats)}`);
 
+      // Map frontend values AND common names to CL's exact category label text
+      const catAliases = {
+        // Frontend category values (from CL_CATEGORIES dropdown)
+        'bicycles': 'bicycles',
+        'bicycle': 'bicycles',
+        'bikes': 'bicycles',
+        'electronics': 'electronics',
+        'furniture': 'furniture',
+        'computers': 'computers',
+        'computer': 'computers',
+        'cell-phones': 'cell phones',
+        'cell phones': 'cell phones',
+        'clothing': 'clothing & accessories',
+        'tools': 'tools',
+        'appliances': 'appliances',
+        'collectibles': 'collectibles',
+        'sports': 'sporting goods',
+        'sporting': 'sporting goods',
+        'sporting-goods': 'sporting goods',
+        'baby': 'baby & kid stuff',
+        'musical-instruments': 'musical instruments',
+        'general': 'general for sale',
+        'for-sale': 'general for sale',
+        'for-sale-by-owner': 'general for sale',
+        'auto-parts': 'auto parts',
+        'cars': 'cars & trucks',
+        'cars-trucks': 'cars & trucks',
+        'motorcycles': 'motorcycles/scooters',
+        'housing': 'apts / housing',
+        'services': 'household services',
+        'real-estate': 'real estate',
+        // CL path codes (broad type — only use as last resort)
+        'fso': 'general for sale',
+        'bfs': 'household services',
+        'cto': 'cars & trucks',
+        'ctd': 'cars & trucks',
+        'mco': 'motorcycles/scooters',
+        'mcd': 'motorcycles/scooters',
+        'apa': 'apts / housing',
+        // More frontend QuickPostModal values
+        'for-sale-general': 'general for sale',
+        'apts-housing': 'apts / housing',
+        'rooms-shares': 'rooms / shared',
+        'vacation-rentals': 'vacation rentals',
+        'office-commercial': 'office / commercial',
+        'services-household': 'household services',
+        'services-labor': 'labor / hauling / moving',
+        'services-automotive': 'automotive services',
+        'jobs-general': 'general labor',
+        'community-general': 'general community',
+        'gigs': 'gigs',
+      };
+
+      // Try matching directly first, then try alias
       let found = await selectRadioByLabelText(page, catKeyword, 'category', log);
       if (!found) {
-        const catAliases = {
-          // Human-readable category names
-          'electronics': 'electronics',
-          'computer': 'computers',
-          'furniture': 'furniture',
-          'auto-parts': 'auto parts',
-          'cell-phones': 'cell phones',
-          'general': 'general for sale',
-          'for-sale-by-owner': 'general for sale',
-          'bicycles': 'bicycles',
-          'bikes': 'bicycles',
-          'bicycle': 'bicycles',
-          'sporting': 'sporting goods',
-          'tools': 'tools',
-          'appliances': 'appliances',
-          'clothing': 'clothing',
-          'collectibles': 'collectibles',
-          'real-estate': 'real estate',
-          'services': 'household services',
-          'service': 'household services',
-          // CL path codes (sent by frontend)
-          'fso': 'general for sale',
-          'bfs': 'household services',
-          'cto': 'cars & trucks',
-          'ctd': 'cars & trucks',
-          'mco': 'motorcycles/scooters',
-          'mcd': 'motorcycles/scooters',
-          'apa': 'apts / housing',
-          // Frontend QuickPostModal dropdown values
-          'for-sale-general': 'general for sale',
-          'sporting-goods': 'sporting goods',
-          'apts-housing': 'apts / housing',
-          'rooms-shares': 'rooms / shared',
-          'vacation-rentals': 'vacation rentals',
-          'office-commercial': 'office / commercial',
-          'services-household': 'household services',
-          'services-labor': 'labor / hauling / moving',
-          'services-automotive': 'automotive services',
-          'jobs-general': 'general labor',
-          'community-general': 'general community',
-          'cars-trucks': 'cars & trucks',
-          'motorcycles': 'motorcycles/scooters',
-          'gigs': 'gigs',
-        };
-        const alias = catAliases[catKeyword] || catKeyword;
-        if (alias !== catKeyword) {
+        const alias = catAliases[catKeyword];
+        if (alias && alias !== catKeyword) {
+          log.log(`Category alias: "${catKeyword}" -> "${alias}"`);
           found = await selectRadioByLabelText(page, alias, 'category (alias)', log);
         }
       }
+      // If categoryName didn't work but we also have category (clPath), try that too
+      if (!found && categoryName && category && category.toLowerCase() !== catKeyword) {
+        const fallbackAlias = catAliases[(category || '').toLowerCase()] || (category || '').toLowerCase();
+        log.log(`Trying category fallback from clPath: "${category}" -> "${fallbackAlias}"`);
+        found = await selectRadioByLabelText(page, fallbackAlias, 'category (clPath fallback)', log);
+      }
       if (!found) {
-        // Last resort: select first available radio
-        // Only set .checked — DO NOT dispatch events or click labels.
-        // CL's JS auto-submits on change/click, destroying the execution context.
+        // Last resort: select "general for sale" or first available radio
+        log.log('No category match — trying "general for sale" as last resort');
+        found = await selectRadioByLabelText(page, 'general for sale', 'category (general fallback)', log);
+      }
+      if (!found) {
         await safeEvaluate(page, () => {
           const radio = document.querySelector('form.picker input[type="radio"]');
           if (radio) {
             radio.checked = true;
           }
         }, undefined, log);
-        log.log('Selected first available category as fallback');
+        log.log('Selected first available category as absolute fallback');
       }
 
       const catBtn = await findContinueButton(page);
