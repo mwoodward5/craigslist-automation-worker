@@ -373,9 +373,9 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
   const areaCode = cityInfo.code;
   const postingType = TYPE_MAP[(category || '').toLowerCase()] || TYPE_MAP[category] || 'for sale by owner';
 
-  log.log(`[v2.16.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
-  log.log(`[v2.16.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
-  log.log(`[v2.16.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
+  log.log(`[v2.17.0] Posting to ${cityKey} (${baseUrl}), area=${areaCode}, subarea=${subarea || 'auto'}, category=${category}, categoryName=${categoryName || 'n/a'}, type=${postingType}`);
+  log.log(`[v2.17.0] Title: "${(title || '').substring(0, 60)}", images=${(imageUrls || []).length}, zip=${adData.zipCode || 'default'}`);
+  log.log(`[v2.17.0] proxyConfig received: ${JSON.stringify(proxyConfig || 'NONE')}`);
 
   // ── Resolve proxy credentials ──
   // Frontend sends { state: 'california', sessionType: 'sticky' }.
@@ -510,11 +510,75 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     }
 
     // =========================================================
-    // Step 1: Navigate directly to the CL posting wizard
+    // Step 0: PROACTIVELY log in BEFORE posting
+    // Posts made when logged in do NOT require email verification.
+    // CL says it "doesn't use cookies" so we must log in each session.
+    // =========================================================
+    const loginEmail = (credentials && credentials.email) || process.env.CL_EMAIL;
+    const loginPassword = (credentials && credentials.password) || process.env.CL_PASSWORD;
+
+    if (loginEmail && loginPassword) {
+      await updateJobStatus(jobId, 'processing', 'logging_in');
+      log.log(`[LOGIN] Proactively logging in as ${loginEmail} before posting...`);
+      try {
+        await page.goto('https://accounts.craigslist.org/login', { waitUntil: 'networkidle2', timeout: 20000 });
+        await delay(1000);
+
+        // Check if already logged in (CL may have session from proxy IP)
+        const loginPageUrl = page.url();
+        const loginPageText = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => '');
+        
+        if (loginPageText.includes('log out') || loginPageText.includes('your account')) {
+          log.log('[LOGIN] Already logged in — skipping login step');
+        } else {
+          // Fill login form
+          const emailInput = await page.$('input[name="inputEmailHandle"]');
+          if (emailInput) {
+            await emailInput.click({ clickCount: 3 }); // select all existing text
+            await delay(100);
+            await emailInput.type(loginEmail, { delay: 30 + Math.random() * 40 });
+            await delay(300 + Math.random() * 200);
+
+            const pwInput = await page.$('input[name="inputPassword"]');
+            if (pwInput) {
+              await pwInput.click();
+              await delay(100);
+              await pwInput.type(loginPassword, { delay: 30 + Math.random() * 40 });
+              await delay(300 + Math.random() * 200);
+
+              const loginBtn = await page.$('button[type="submit"]');
+              if (loginBtn) {
+                await clickAndNavigate(page, () => loginBtn.click(), 'login submit', 20000, log);
+              }
+            }
+          }
+
+          // Verify login succeeded
+          const afterLoginUrl = page.url();
+          const afterLoginText = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => '');
+          log.log(`[LOGIN] After login URL: ${afterLoginUrl}`);
+          
+          if (afterLoginText.includes('log out') || afterLoginText.includes('your account') || afterLoginUrl.includes('accounts.craigslist.org/login/home')) {
+            log.log('[LOGIN] Login successful — session established');
+          } else if (afterLoginText.includes('incorrect') || afterLoginText.includes('invalid') || afterLoginText.includes('error')) {
+            log.log(`[LOGIN] WARNING: Login may have failed. Page text: ${afterLoginText.substring(0, 200)}`);
+          } else {
+            log.log(`[LOGIN] Login status unclear. URL: ${afterLoginUrl}`);
+          }
+        }
+      } catch (loginErr) {
+        log.log(`[LOGIN] Proactive login failed (non-fatal, will retry if redirected): ${loginErr.message.substring(0, 100)}`);
+      }
+    } else {
+      log.log('[LOGIN] WARNING: No CL credentials available — posts will require email verification');
+    }
+
+    // =========================================================
+    // Step 1: Navigate to the CL posting wizard
     // =========================================================
     await updateJobStatus(jobId, 'processing', 'navigating');
     const postUrl = `https://post.craigslist.org/c/${areaCode}`;
-    log.log('Navigating directly to posting wizard:', postUrl);
+    log.log('Navigating to posting wizard:', postUrl);
     await page.goto(postUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await delay(2000);
     const wizardUrl = page.url();
@@ -522,8 +586,7 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     log.log(`Wizard URL: ${wizardUrl}`);
     log.log(`Wizard title: ${wizardTitle}`);
 
-    // Check for CL region redirect — if CL sends us to the wrong region (e.g. "aberdeen")
-    // based on the server's IP geolocation, log a warning.
+    // Check for CL region redirect
     if (wizardTitle && !wizardTitle.toLowerCase().includes(cityKey.replace(/county|empire|bay/gi, '').trim().substring(0, 5))) {
       log.log(`WARNING: Page title "${wizardTitle}" may not match target city "${cityKey}". CL may have redirected based on server IP.`);
     }
@@ -532,15 +595,12 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     log.log('Detected initial stage:', stage);
 
     // =========================================================
-    // Handle login redirect if needed
+    // Handle login redirect (fallback if proactive login failed)
     // =========================================================
     const currentUrl = page.url();
     if (currentUrl.includes('accounts.craigslist.org/login')) {
-      log.log('Login required — attempting to log in');
+      log.log('[LOGIN] Redirected to login (proactive login may have failed) — retrying...');
       await updateJobStatus(jobId, 'processing', 'logging_in');
-
-      const loginEmail = (credentials && credentials.email) || process.env.CL_EMAIL;
-      const loginPassword = (credentials && credentials.password) || process.env.CL_PASSWORD;
 
       if (!loginEmail || !loginPassword) {
         await capturePageDebug(page, log);
@@ -549,10 +609,14 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
 
       const emailInput = await page.$('input[name="inputEmailHandle"]');
       if (emailInput) {
-        await emailInput.type(loginEmail);
+        await emailInput.click({ clickCount: 3 });
+        await delay(100);
+        await emailInput.type(loginEmail, { delay: 30 + Math.random() * 40 });
         const pwInput = await page.$('input[name="inputPassword"]');
         if (pwInput) {
-          await pwInput.type(loginPassword);
+          await pwInput.click();
+          await delay(100);
+          await pwInput.type(loginPassword, { delay: 30 + Math.random() * 40 });
           const loginBtn = await page.$('button[type="submit"]');
           if (loginBtn) {
             await clickAndNavigate(page, () => loginBtn.click(), 'login submit', 15000, log);
