@@ -5,11 +5,11 @@ const path = require('path');
 const os = require('os');
 
 const CITY_MAP = {
-  'orangecounty': { base: 'https://orangecounty.craigslist.org', code: 'orc' },
-  'losangeles': { base: 'https://losangeles.craigslist.org', code: 'lac' },
-  'sfbay': { base: 'https://sfbay.craigslist.org', code: 'sfc' },
-  'sandiego': { base: 'https://sandiego.craigslist.org', code: 'sdo' },
-  'inlandempire': { base: 'https://inlandempire.craigslist.org', code: 'iee' },
+  'orangecounty': { base: 'https://orangecounty.craigslist.org', code: 'orc', zip: '92694' },
+  'losangeles': { base: 'https://losangeles.craigslist.org', code: 'lac', zip: '90012' },
+  'sfbay': { base: 'https://sfbay.craigslist.org', code: 'sfc', zip: '94102' },
+  'sandiego': { base: 'https://sandiego.craigslist.org', code: 'sdo', zip: '92101' },
+  'inlandempire': { base: 'https://inlandempire.craigslist.org', code: 'iee', zip: '92501' },
 };
 
 // Map category to the radio button label text on CL wizard "choose type" page.
@@ -595,7 +595,13 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await fillField(page, 'input[name="PostingTitle"]', title || 'Item for Sale', 'title', log);
       await fillField(page, 'input[name="price"]', String(price || ''), 'price', log);
       await fillField(page, 'textarea[name="PostingBody"]', description || '', 'description', log);
-      await fillField(page, 'input[name="postal"]', adData.zip || adData.zipCode || '92694', 'zip', log);
+      // IMPORTANT: Always use a zip code local to the TARGET CL city.
+      // If the ad's zip is in a different region than the target city,
+      // CL's map/geoverify will reject or redirect to the wrong area.
+      // The city's default zip ensures the post lands in the right region.
+      const cityZip = cityInfo.zip || '92694';
+      log.log(`Using city zip: ${cityZip} for target city: ${cityKey} (ad's original zip: ${adData.zip || adData.zipCode || 'none'})`);
+      await fillField(page, 'input[name="postal"]', cityZip, 'zip', log);
 
       // Brief pause after zip — CL sometimes does AJAX validation that modifies the DOM
       await delay(1000);
