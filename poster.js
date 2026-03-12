@@ -369,7 +369,16 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
     log.log('Navigating directly to posting wizard:', postUrl);
     await page.goto(postUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await delay(2000);
-    log.log('Wizard URL:', page.url());
+    const wizardUrl = page.url();
+    const wizardTitle = await page.title().catch(() => '(unknown)');
+    log.log(`Wizard URL: ${wizardUrl}`);
+    log.log(`Wizard title: ${wizardTitle}`);
+
+    // Check for CL region redirect — if CL sends us to the wrong region (e.g. "aberdeen")
+    // based on the server's IP geolocation, log a warning.
+    if (wizardTitle && !wizardTitle.toLowerCase().includes(cityKey.replace(/county|empire|bay/gi, '').trim().substring(0, 5))) {
+      log.log(`WARNING: Page title "${wizardTitle}" may not match target city "${cityKey}". CL may have redirected based on server IP.`);
+    }
 
     let stage = await detectStage(page, log);
     log.log('Detected initial stage:', stage);
@@ -632,12 +641,12 @@ async function postToCraigslist({ jobId, adData, proxyConfig, targetCity, creden
       await fillField(page, 'input[name="PostingTitle"]', title || 'Item for Sale', 'title', log);
       await fillField(page, 'input[name="price"]', String(price || ''), 'price', log);
       await fillField(page, 'textarea[name="PostingBody"]', description || '', 'description', log);
-      // IMPORTANT: Always use a zip code local to the TARGET CL city.
-      // If the ad's zip is in a different region than the target city,
-      // CL's map/geoverify will reject or redirect to the wrong area.
-      // The city's default zip ensures the post lands in the right region.
-      const cityZip = cityInfo.zip || '92694';
-      log.log(`Using city zip: ${cityZip} for target city: ${cityKey} (ad's original zip: ${adData.zip || adData.zipCode || 'none'})`);
+      // Use the zip code from the frontend payload (which may come from the selected subarea).
+      // Only fall back to the city's default zip if the frontend didn't send one.
+      // The frontend now sends subarea-specific zips (e.g. 90802 for Long Beach in LA).
+      const frontendZip = adData.zipCode || adData.zip;
+      const cityZip = frontendZip || cityInfo.zip || '92694';
+      log.log(`Using zip: ${cityZip} (frontend=${frontendZip || 'none'}, cityDefault=${cityInfo.zip}, subarea=${subarea || 'none'})`);
       await fillField(page, 'input[name="postal"]', cityZip, 'zip', log);
 
       // Brief pause after zip — CL sometimes does AJAX validation that modifies the DOM
