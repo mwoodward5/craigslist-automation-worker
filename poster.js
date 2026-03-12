@@ -48,44 +48,53 @@ function getCityInfo(subdomain) {
 // Map category to the radio button label text on CL wizard "choose type" page.
 // Supports both human-readable names AND CL path codes (fso, bfs, cto, etc.)
 const TYPE_MAP = {
-  // Human-readable names
+  // ── Frontend CL_CATEGORIES values (sent as category field) ──
+  // These are the subcategory values from CraigslistPostingSection.tsx
+  'for-sale': 'for sale by owner',
   'for-sale-by-owner': 'for sale by owner',
   'electronics': 'for sale by owner',
   'general': 'for sale by owner',
   'computer': 'for sale by owner',
+  'computers': 'for sale by owner',
   'furniture': 'for sale by owner',
   'auto-parts': 'for sale by owner',
   'cell-phones': 'for sale by owner',
   'bicycles': 'for sale by owner',
   'bikes': 'for sale by owner',
   'bicycle': 'for sale by owner',
+  'sports': 'for sale by owner',
   'sporting': 'for sale by owner',
+  'sporting-goods': 'for sale by owner',
   'tools': 'for sale by owner',
   'appliances': 'for sale by owner',
   'clothing': 'for sale by owner',
   'collectibles': 'for sale by owner',
+  'baby': 'for sale by owner',
+  'musical-instruments': 'for sale by owner',
+  'cars': 'for sale by owner',
+  'cars-trucks': 'for sale by owner',
+  'motorcycles': 'for sale by owner',
   'housing': 'housing offered',
   'real-estate': 'for sale by owner',
   'services': 'service offered',
   'service': 'service offered',
-  // CL path codes (sent by frontend)
-  'fso': 'for sale by owner',      // for sale by owner
-  'fsd': 'for sale by dealer',     // for sale by dealer
-  'bfs': 'service offered',        // business/financial services
-  'cto': 'for sale by owner',      // cars & trucks - by owner
-  'ctd': 'for sale by dealer',     // cars & trucks - by dealer
-  'mco': 'for sale by owner',      // motorcycles - by owner
-  'mcd': 'for sale by dealer',     // motorcycles - by dealer
-  'apa': 'housing offered',        // apartments / housing for rent
-  'hou': 'housing offered',        // housing
-  'rea': 'housing offered',        // real estate
-  'gig': 'gig offered',            // gigs
-  'com': 'community',              // community
-  'eve': 'event / class',          // events
-  'rid': 'community',              // rideshare
-  // Frontend QuickPostModal dropdown values (exact match)
+  // ── CL path codes (legacy — frontend may still send these) ──
+  'fso': 'for sale by owner',
+  'fsd': 'for sale by dealer',
+  'bfs': 'service offered',
+  'cto': 'for sale by owner',
+  'ctd': 'for sale by dealer',
+  'mco': 'for sale by owner',
+  'mcd': 'for sale by dealer',
+  'apa': 'housing offered',
+  'hou': 'housing offered',
+  'rea': 'housing offered',
+  'gig': 'gig offered',
+  'com': 'community',
+  'eve': 'event / class',
+  'rid': 'community',
+  // ── Frontend QuickPostModal dropdown values ──
   'for-sale-general': 'for sale by owner',
-  'sporting-goods': 'for sale by owner',
   'apts-housing': 'housing offered',
   'rooms-shares': 'housing offered',
   'vacation-rentals': 'housing offered',
@@ -95,8 +104,6 @@ const TYPE_MAP = {
   'services-automotive': 'service offered',
   'jobs-general': 'job offered',
   'community-general': 'community',
-  'cars-trucks': 'for sale by owner',
-  'motorcycles': 'for sale by owner',
   'gigs': 'gig offered',
 };
 
