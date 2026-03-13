@@ -12,7 +12,7 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-const VERSION = '2.18.0';
+const VERSION = '2.18.1';
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
@@ -117,15 +117,28 @@ app.post('/test-post', async (req, res) => {
 // Posting endpoints
 // =========================================================
 async function handlePostJob(req, res) {
-  const { jobId, adData, proxyConfig, targetCity, credentials } = req.body;
-  logger.log(`[SERVER] Job received: jobId=${jobId}, city=${targetCity}, proxy=${JSON.stringify(proxyConfig || 'NONE').substring(0, 200)}`);
-  if (!adData) return res.status(400).json({ error: 'adData is required' });
+  const { jobId, proxyConfig, targetCity, credentials } = req.body;
+
+  // Normalize: accept both "adData" (main UI) and "ad" (auto-renew) formats
+  let adData = req.body.adData || req.body.ad;
+
+  if (!adData) return res.status(400).json({ error: 'adData or ad is required' });
+
+  // Normalize field names: auto-renew sends "body", poster.js expects "description"
+  if (adData.body && !adData.description) {
+    adData.description = adData.body;
+  }
+
+  // Normalize city: auto-renew sends city inside ad object
+  const effectiveTargetCity = targetCity || adData.city || 'orangecounty';
+
+  logger.log(`[SERVER] Job received: jobId=${jobId}, city=${effectiveTargetCity}, proxy=${JSON.stringify(proxyConfig || 'NONE').substring(0, 200)}`);
 
   res.json({ success: true, message: 'Job accepted', jobId });
 
   try {
     await updateJobStatus(jobId, 'processing', 'connecting');
-    const result = await postToCraigslist({ jobId, adData, proxyConfig, targetCity, credentials, updateJobStatus, logger });
+    const result = await postToCraigslist({ jobId, adData, proxyConfig, targetCity: effectiveTargetCity, credentials, updateJobStatus, logger });
     await updateJobStatus(jobId, 'completed', 'done', { result_url: result.postUrl });
   } catch (err) {
     logger.error('Posting failed:', err.message);
